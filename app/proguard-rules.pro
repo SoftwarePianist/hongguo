@@ -1,2 +1,4 @@
+-keepattributes SourceFile,LineNumberTable
+
 -keep class xyz.kejiyu.hongguo.MainHook { *; }
 -keep class xyz.kejiyu.hongguo.MainActivity { *; }

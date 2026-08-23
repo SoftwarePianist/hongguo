@@ -8,6 +8,7 @@
         android:name="android.permission.INTERNET" />
 
     <queries>
+        <package android:name="com.dragon.read" />
         <package android:name="com.phoenix.read" />
         <package android:name="com.phoenix.read.oversea.gp" />
     </queries>
@@ -32,7 +33,7 @@
 
         <meta-data
             android:name="xposedscope"
-            android:value="com.phoenix.read,com.phoenix.read.oversea.gp,xyz.kejiyu.hongguo" />
+            android:value="com.dragon.read,com.phoenix.read,com.phoenix.read.oversea.gp,xyz.kejiyu.hongguo" />
 
         <activity
             android:name=".MainActivity"

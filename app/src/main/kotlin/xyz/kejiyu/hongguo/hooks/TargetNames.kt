@@ -255,7 +255,7 @@ object TargetNames {
 
         staticHideIds = listOf(0x7F1133AE, 0x7F112411, 0x7F112E0D),
         staticProgressIds = listOf(0x7F112D92),
-        pauseRestoreIds = listOf(0x7F112411),
+        pauseRestoreIds = listOf(0x7F1133AE, 0x7F112411, 0x7F112E0D),
     )
 
     internal val OVERSEA_73132 = Names(
@@ -314,13 +314,18 @@ object TargetNames {
             "ly_tools_bar_icon",
             "series_info_panel_container",
             "top_header_constraint_layout",
+            "bottom_container",
+            "bottom_bar_container",
+            "short_series_catalog_view",
+            "more_operation_view",
+            "enter_episode_and_full_screen_container",
         ),
         progressIdNames = listOf("seek_bar_root"),
 
-        staticHideIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07),
+        staticHideIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07, 0x7F0B05A6, 0x7F0B0597, 0x7F0B2983, 0x7F0B1FA3, 0x7F0B0FAE),
         staticProgressIds = listOf(0x7F0B2877),
 
-        pauseRestoreIds = listOf(0x7F0B2615, 0x7F0B1E9C),
+        pauseRestoreIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07, 0x7F0B05A6, 0x7F0B0597, 0x7F0B2983, 0x7F0B1FA3, 0x7F0B0FAE),
     )
 
     internal val CN: Names get() = CN_73132

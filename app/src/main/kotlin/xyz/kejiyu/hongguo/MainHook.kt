@@ -30,20 +30,17 @@ class MainHook : XposedModule() {
         LogUtil.info("══════════════════════════════")
         log(Log.INFO, TAG, "模块已加载 | 进程=${param.processName} | API=${apiVersion}")
 
-        try {
-            val ver = BuildConfig.VERSION_NAME.substringBefore(' ').substringBefore('(')
-            LogUtil.info("更新检查启动 | 当前版本=$ver")
-            UpdateChecker.checkUpdate(ver) { latest ->
-                if (latest != null) {
-                    LogUtil.info("发现新版本 $latest（当前 $ver）")
-                    Hooks.showUpdateDialogIfAvailable()
-                } else if (UpdateChecker.lastError != null) {
-                    LogUtil.warn("更新检查失败: ${UpdateChecker.lastError}")
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try {
+                val ver = BuildConfig.VERSION_NAME.substringBefore(' ').substringBefore('(')
+                UpdateChecker.checkUpdate(ver) { latest ->
+                    if (latest != null) {
+                        LogUtil.info("发现新版本 $latest（当前 $ver）")
+                        Hooks.showUpdateDialogIfAvailable()
+                    }
                 }
-            }
-        } catch (e: Exception) {
-            LogUtil.error("更新检查启动失败", e)
-        }
+            } catch (_: Throwable) {}
+        }, 6000L)
     }
 
     override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {
