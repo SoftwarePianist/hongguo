@@ -1447,10 +1447,18 @@ object Hooks {
         } catch (_: Throwable) {}
     }
 
+    private fun shouldRestoreOnPause(id: Int): Boolean {
+        if (gControlOn && gTargetIdSet.contains(id)) return true
+        if (gPlayerOn && gSeriesTargetIdSet.contains(id)) return true
+        if (gProgressOff && gProgressIdSet.contains(id)) return true
+        return false
+    }
+
     private fun scanTreePauseRestore(v: View?) {
         if (v == null) return
         try {
-            if (v.id > 0 && gPauseRestoreIdSet.contains(v.id)) {
+            val id = v.id
+            if (id > 0 && gPauseRestoreIdSet.contains(id) && shouldRestoreOnPause(id)) {
                 forceOnePauseRestoreView(v)
             }
         } catch (_: Throwable) {}
@@ -1587,6 +1595,7 @@ object Hooks {
     private fun registerShortVideoHolder(holder: Any?, playbackState: Int? = null) {
         if (holder == null) return
         val now = android.os.SystemClock.uptimeMillis()
+        gLastHolderBindAt = now
         synchronized(gShortVideoHolders) {
             gShortVideoHolders.removeAll { it.ref.get() == null }
             val old = gShortVideoHolders.firstOrNull { it.ref.get() === holder }
@@ -1939,8 +1948,12 @@ object Hooks {
             gVideoToolbarLayers.add(java.lang.ref.WeakReference(layer))
         }
         if (added) LogUtil.info("video layer registered: ${layer.javaClass.name}")
-        if (added && gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
-            mainHandler.post { setOneVideoToolbarVisible(layer, true) }
+        if (added && gMasterOn && gPlayerOn) {
+            // 新构造图层默认可见：构造hook内同步隐藏（此时View未挂树未绘制，零闪现）；用户暂停窗口保持可见
+            val userPauseWindow = gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause()
+            val show = !userPauseWindow
+            if (android.os.Looper.myLooper() == mainHandler.looper) setOneVideoToolbarVisible(layer, show)
+            else mainHandler.post { setOneVideoToolbarVisible(layer, show) }
         }
     }
     private fun videoToolbarLayerSnapshot(): List<Any> = synchronized(gVideoToolbarLayers) {
@@ -2046,9 +2059,22 @@ object Hooks {
     }
 
     @Volatile private var gPauseRestoreRunnable: Runnable? = null
+    @Volatile private var gVideoStateEverSet = false
+    @Volatile private var gLastHolderBindAt = 0L
+    @Volatile private var gPauseStartedAt = 0L
+    @Volatile private var gLastVideoModelAt = 0L
+    @Volatile private var gLastUserClickAt = 0L
+    @Volatile private var gTouchDownX = 0f
+    @Volatile private var gTouchDownY = 0f
+
+    // 暂停后出现新视频模型/新holder绑定 = 自动连播切集窗口，此时不放行播放器控制栏显示
+    private fun isEpisodeSwitchPause(): Boolean =
+        gPauseStartedAt > 0L && (gLastVideoModelAt > gPauseStartedAt || gLastHolderBindAt > gPauseStartedAt)
 
     private fun setVideoPaused(paused: Boolean, reason: String = "callback") {
-        val changed = gVideoPaused != paused
+        val first = !gVideoStateEverSet
+        val changed = first || gVideoPaused != paused
+        gVideoStateEverSet = true
         gVideoPaused = paused
         gLastVideoStateAt = android.os.SystemClock.uptimeMillis()
         gLastVideoStateReason = reason
@@ -2056,26 +2082,60 @@ object Hooks {
 
         if (!gMasterOn || !gRestoreControlsOnPause) return
         if (paused) {
+            if (!changed) return
+            gPauseStartedAt = android.os.SystemClock.uptimeMillis()
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
-            val r = Runnable {
-                if (gMasterOn && gRestoreControlsOnPause && gVideoPaused) {
+            val isCompletedPause = reason.contains("completed")
+            val isUserClick = android.os.SystemClock.uptimeMillis() - gLastUserClickAt < 800L
+            val baseDelay = when {
+                isUserClick -> 0L
+                isCompletedPause -> 3000L
+                else -> 900L
+            }
+            if (baseDelay > 0L) LogUtil.info("pause restore delay=${baseDelay}ms (completed=$isCompletedPause click=$isUserClick reason=$reason)")
+            val r = object : Runnable {
+                override fun run() {
+                    if (!gMasterOn || !gRestoreControlsOnPause || !gVideoPaused) return
+                    if (!isUserClick) {
+                        val now = android.os.SystemClock.uptimeMillis()
+                        val sinceBind = now - gLastHolderBindAt
+                        val newModelAfterPause = gLastVideoModelAt > gPauseStartedAt
+                        if (sinceBind < 2500L || newModelAfterPause) {
+                            LogUtil.info("video paused during episode switch(bind=${sinceBind}ms newModel=$newModelAfterPause), defer restore")
+                            mainHandler.postDelayed(this, 400L)
+                            return
+                        }
+                    }
                     restoreAllControls()
                     restoreNativeBottomWindowColor(gCurrentActivity)
                     setVideoToolbarsVisible(true)
                     forcePauseRestoreControls()
                     LogUtil.info("video paused: restore controls, reason=$reason")
+
+                    mainHandler.postDelayed({
+                        if (gMasterOn && gRestoreControlsOnPause && gVideoPaused &&
+                            gLastVideoModelAt > gPauseStartedAt
+                        ) {
+                            LogUtil.info("pause restore re-check: hide controls again")
+                            mainHandler.post { scanAllWindows() }
+                        }
+                    }, 2500L)
                 }
             }
             gPauseRestoreRunnable = r
-            mainHandler.postDelayed(r, 350L)
+            mainHandler.postDelayed(r, baseDelay)
         } else {
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
             gPauseRestoreRunnable = null
             restorePauseForcedViews()
             if (gPlayerOn) setVideoToolbarsVisible(false)
             if (changed) {
-                mainHandler.post { scanAllWindows() }
                 LogUtil.info("video resumed: hide controls, reason=$reason")
+                mainHandler.post { scanAllWindows() }
+                if (first) {
+                    mainHandler.postDelayed({ if (!gVideoPaused) scanAllWindows() }, 1200L)
+                    mainHandler.postDelayed({ if (!gVideoPaused) scanAllWindows() }, 3000L)
+                }
             }
         }
     }
@@ -2599,6 +2659,24 @@ object Hooks {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    @Volatile private var videoInfoListMethodCache: java.lang.reflect.Method? = null
+
+    private fun findVideoInfoByResolution(model: Any?, highest: Any?): Any? {
+        if (model == null || highest == null) return null
+        return try {
+            val listGetter = videoInfoListMethodCache ?: model.javaClass.methods.firstOrNull {
+                it.name == "getVideoInfoList" && it.parameterCount == 0
+            }?.also { videoInfoListMethodCache = it } ?: return null
+            val list = listGetter.invoke(model) as? List<*> ?: return null
+            list.firstOrNull { info ->
+                try {
+                    val res = info?.javaClass?.methods?.firstOrNull { it.name == "getResolution" && it.parameterCount == 0 }?.invoke(info)
+                    res === highest
+                } catch (_: Throwable) { false }
+            }
+        } catch (_: Throwable) { null }
     }
 
     private fun rememberAndApplyHighestResolution(engine: Any?, model: Any?) {
@@ -3508,6 +3586,13 @@ object Hooks {
     )
 
     private fun nativeSettingsSpec(): NativeSettingsSpec = when {
+        gPkg == TargetNames.OVERSEA_PACKAGE && gNames.profileId == "OVERSEA-7.3.5.32" -> NativeSettingsSpec(
+            listMethods = setOf("n1", "o1"),
+            itemClass = "hz5.e",
+            clickClass = "hz5.b",
+            checkedClass = null,
+            style = "oversea-arrow",
+        )
         gPkg == TargetNames.OVERSEA_PACKAGE -> NativeSettingsSpec(
             listMethods = setOf("e1", "f1"),
             itemClass = "vr5.e",
@@ -3833,7 +3918,8 @@ object Hooks {
         gNames.staticHideIds.forEach { gTargetIdSet.add(it) }
         gNames.staticProgressIds.forEach { gProgressIdSet.add(it) }
         gNames.pauseRestoreIds.forEach { gPauseRestoreIdSet.add(it) }
-        staticSeriesIds.forEach {
+        val effectiveSeriesIds = if (gNames.seriesStaticIds.isNotEmpty()) gNames.seriesStaticIds else staticSeriesIds
+        effectiveSeriesIds.forEach {
             gSeriesTargetIdSet.add(it)
             gPauseRestoreIdSet.add(it)
         }
@@ -3864,6 +3950,10 @@ object Hooks {
             try {
                 val mainClazz = Class.forName("com.dragon.read.pages.main.MainFragmentActivity", false, classLoader)
                 val nativeMethods = when {
+                    pkg == TargetNames.OVERSEA_PACKAGE && gNames.profileId == "OVERSEA-7.3.5.32" -> {
+
+                        listOf("onCreate", "B2", "J2", "o1", "n1")
+                    }
                     pkg == TargetNames.OVERSEA_PACKAGE -> {
 
                         listOf("onCreate", "B2", "N1", "f1", "j2")
@@ -4161,7 +4251,9 @@ object Hooks {
         if (gNames.resolutionController.isNotBlank()) {
             try {
                 val controllerClass = Class.forName(gNames.resolutionController, false, classLoader)
-                val engineField = controllerClass.getDeclaredField(gNames.resolutionEngineField).apply { isAccessible = true }
+                val engineField = if (gNames.resolutionEngineField.isNotBlank()) {
+                    controllerClass.getDeclaredField(gNames.resolutionEngineField).apply { isAccessible = true }
+                } else null
                 for ((methodIndex, methodName) in gNames.resolutionModelMethods.withIndex()) {
                     ham(controllerClass, methodName, "maxQualityModel_${methodIndex}") { chain ->
                         val controller = chain.thisObject
@@ -4171,7 +4263,7 @@ object Hooks {
                         if (gNames.resolutionApplyMethod.isBlank()) {
 
                             try {
-                                val engineBefore = if (controller != null) engineField.get(controller) else null
+                                val engineBefore = if (engineField != null && controller != null) engineField.get(controller) else null
                                 if (engineBefore != null && highest != null) gEngineMaxResolution[engineBefore] = highest
                             } catch (_: Throwable) {}
                         } else if (controller != null && highest != null) {
@@ -4183,11 +4275,17 @@ object Hooks {
                             if (highest != null) {
                                 LogUtil.info("最高画质：检测到 $highest rank=${resolutionRank(highest)}")
                                 if (gNames.resolutionApplyMethod.isNotBlank()) {
-
                                     if (gMasterOn && gMaxQualityOn) applyHighestViaController(controller, highest)
-                                } else {
+                                } else if (engineField != null) {
                                     val engine = if (controller != null) engineField.get(controller) else null
                                     rememberAndApplyHighestResolution(engine, model)
+                                } else if (gMasterOn && gMaxQualityOn && result != null) {
+                                    val targetVideoInfo = findVideoInfoByResolution(model, highest)
+                                    if (targetVideoInfo != null && targetVideoInfo !== result) {
+                                        LogUtil.info("最高画质：替换播放流 -> $highest")
+                                        LogUtil.incr("maxQualityApply")
+                                        return@ham targetVideoInfo
+                                    }
                                 }
                             }
                         } catch (e: Throwable) {
@@ -4199,14 +4297,53 @@ object Hooks {
 
                 if (gNames.resolutionApplyMethod.isBlank()) {
                     val engineClass = Class.forName("com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
+                    try {
+                        val vcDiagClass = Class.forName(gNames.playbackState, false, classLoader)
+                        ham(vcDiagClass, "onVideoStreamBitrateChanged", "maxQualityDiag") { chain ->
+                            try {
+                                val res = chain.getArg(0)
+                                LogUtil.info("最高画质：实际播放流=$res")
+                            } catch (_: Throwable) {}
+                            chain.proceed()
+                        }
+                    } catch (_: Throwable) {}
+                    ham(engineClass, "setVideoModel", "maxQualityModelSource") { chain ->
+                        val result = chain.proceed()
+                        try {
+                            gLastVideoModelAt = android.os.SystemClock.uptimeMillis()
+                            val engine = chain.thisObject
+                            val model = chain.getArg(0)
+                            val highest = findHighestResolution(model)
+                            if (engine != null && highest != null) {
+                                gEngineMaxResolution[engine] = highest
+                                LogUtil.info("最高画质：model 来源 $highest")
+                                if (gMasterOn && gMaxQualityOn) {
+                                    try {
+                                        engineClass.getDeclaredMethod("configResolution", highest.javaClass)
+                                            .invoke(engine, highest)
+                                        LogUtil.incr("maxQualityApply")
+                                        LogUtil.info("最高画质：已请求引擎切换 $highest")
+                                    } catch (_: Throwable) {}
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                        result
+                    }
                     ham(engineClass, "configResolution", "maxQualityConfig") { chain ->
                         if (!gMasterOn || !gMaxQualityOn) return@ham chain.proceed()
                         val engine = chain.thisObject
-                        val highest = try { gEngineMaxResolution[engine] } catch (_: Throwable) { null }
+                        var highest = try { gEngineMaxResolution[engine] } catch (_: Throwable) { null }
+                        if (highest == null) {
+                            try {
+                                val model = engineClass.getDeclaredMethod("getVideoModel").invoke(engine)
+                                highest = findHighestResolution(model)
+                                if (highest != null) gEngineMaxResolution[engine] = highest
+                            } catch (_: Throwable) {}
+                        }
                         if (highest == null) return@ham chain.proceed()
                         try {
                             val requested = chain.getArg(0)
-                            if (requested !== highest) {
+                            if (requested !== highest && resolutionRank(requested) < resolutionRank(highest)) {
                                 val args = (chain.args as Array<Any?>).copyOf()
                                 args[0] = highest
                                 LogUtil.info("最高画质：拦截 $requested -> $highest")
@@ -4619,7 +4756,13 @@ object Hooks {
             val c = Class.forName("com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
             ham(c, "pause", "ttPause") { chain ->
                 val result = chain.proceed()
-                setVideoPaused(true, "TTVideoEngine#pause")
+                val completed = try {
+                    val engine = chain.thisObject
+                    val pos = (c.getDeclaredMethod("getCurrentPosition").invoke(engine) as? Number)?.toInt() ?: 0
+                    val dur = (c.getDeclaredMethod("getDuration").invoke(engine) as? Number)?.toInt() ?: 0
+                    dur > 0 && pos >= dur - 800
+                } catch (_: Throwable) { false }
+                setVideoPaused(true, if (completed) "TTVideoEngine#pause(completed)" else "TTVideoEngine#pause")
                 result
             }
             ham(c, "play", "ttPlay") { chain ->
@@ -4682,7 +4825,7 @@ object Hooks {
                 val result = chain.proceed()
                 setVideoPaused(false, "LayerHostMediaLayout#onVideoPlay")
                 scheduleDefaultSpeedApply("LayerHostMediaLayout#onVideoPlay")
-                if (gMasterOn && gPlayerOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                if (gMasterOn && gPlayerOn && !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) {
                     setVideoToolbarsVisible(false)
                     mainHandler.post { scanAllWindows() }
                 }
@@ -4711,22 +4854,22 @@ object Hooks {
         }
 
         try { val c = Class.forName("com.dragon.read.pages.video.layers.toolbarlayer.ToolbarLayerFixed", false, classLoader)
-            ham(c, gNames.fixedToolbarShowMethod, "pb") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("btmBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
+            ham(c, gNames.fixedToolbarShowMethod, "pb") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("btmBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
             LogUtil.info("  ✓ playerBtm") } catch (e: Exception) { LogUtil.warn("  ToolbarLayerFixed 未找到") }
 
         try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
-            ham(c, gNames.customizeToolbarShowMethod, "pt") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
+            ham(c, gNames.customizeToolbarShowMethod, "pt") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
             LogUtil.info("  ✓ playerTop") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer 未找到") }
 
         try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
-            module.hook(c.getDeclaredMethod(gNames.customizeToolbarApplyMethod, Boolean::class.java, Boolean::class.java, Boolean::class.java)).setId("ctS").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } })
+            module.hook(c.getDeclaredMethod(gNames.customizeToolbarApplyMethod, Boolean::class.java, Boolean::class.java, Boolean::class.java)).setId("ctS").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } })
             LogUtil.info("  ✓ CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod}") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod} 未找到") }
 
         try { val c = Class.forName(gNames.toolbarBase, false, classLoader)
             hac(c, "toolbarBaseCtor") { chain -> val r = chain.proceed(); registerToolbarBaseLayer(chain.thisObject); r }
             module.hook(c.getDeclaredMethod("a", Boolean::class.java)).setId("gt7c").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
                 registerToolbarBaseLayer(chain.thisObject)
-                if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("toolbarBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() }
+                if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("toolbarBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() }
             })
             LogUtil.info("  ✓ ${gNames.toolbarBase}.a") } catch (e: Exception) { LogUtil.warn("  ${gNames.toolbarBase} 未找到") }
 
@@ -4910,7 +5053,29 @@ object Hooks {
         try { val c = Class.forName("androidx.swiperefreshlayout.widget.SwipeRefreshLayout", false, classLoader); module.hook(c.getDeclaredMethod("onInterceptTouchEvent", android.view.MotionEvent::class.java)).setId("sw").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gRefreshOff) false else chain.proceed() }); LogUtil.info("  ✓ swipe") } catch (e: Exception) { LogUtil.warn("  SwipeRefreshLayout 未找到") }
 
         try { val c = Class.forName(gNames.topZoneTouch, false, classLoader); module.hook(c.getDeclaredMethod("onTouchEvent", android.view.MotionEvent::class.java)).setId("tz1").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ ${gNames.topZoneTouch}") } catch (e: Exception) { LogUtil.warn("  ${gNames.topZoneTouch} 未找到") }
-        try { val c = Class.forName("android.app.Activity", false, classLoader); module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)).setId("tz2").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ dispatchTouch") } catch (e: Exception) { LogUtil.error("tz2", e) }
+        try { val c = Class.forName("android.app.Activity", false, classLoader); module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)).setId("tz2").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> try { val ev = chain.getArg(0) as? android.view.MotionEvent; if (ev != null) { when (ev.actionMasked) { android.view.MotionEvent.ACTION_DOWN -> { gTouchDownX = ev.x; gTouchDownY = ev.y } android.view.MotionEvent.ACTION_UP -> { if (kotlin.math.abs(ev.x - gTouchDownX) < 25f && kotlin.math.abs(ev.y - gTouchDownY) < 25f) gLastUserClickAt = android.os.SystemClock.uptimeMillis() } else -> {} } } } catch (_: Throwable) {}; if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ dispatchTouch") } catch (e: Exception) { LogUtil.error("tz2", e) }
+
+        // 应隐藏状态下 app 将目标UI设为可见时同步改回隐藏，消除切集闪现（与收藏/评论的零闪现机制对齐）
+        try {
+            val viewClass = Class.forName("android.view.View", false, classLoader)
+            module.hook(viewClass.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType)).setId("sv").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
+                try {
+                    val blocked: Boolean
+                    if (chain.getArg(0) as? Int == View.VISIBLE && gInternalViewMutation.get() != true) {
+                        val v = chain.thisObject as? View
+                        blocked = v != null && v.visibility != View.VISIBLE &&
+                            gMasterOn && (gControlOn || gPlayerOn) &&
+                            !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause()) &&
+                            (quickMatch(v) || isProgressBar(v))
+                    } else blocked = false
+                    if (blocked) {
+                        LogUtil.incr("showBlock")
+                        chain.proceed(arrayOf<Any?>(View.INVISIBLE as Any?))
+                    } else chain.proceed()
+                } catch (_: Throwable) { chain.proceed() }
+            })
+            LogUtil.info("  ✓ setVisibility guard")
+        } catch (e: Exception) { LogUtil.error("sv", e) }
 
         try {
             val c = Class.forName("android.app.Activity", false, classLoader)

@@ -5,7 +5,7 @@ object TargetNames {
     const val CN_PACKAGE = "com.phoenix.read"
     const val OVERSEA_PACKAGE = "com.phoenix.read.oversea.gp"
     val SUPPORTED_CN_VERSIONS = listOf("7.3.1.32", "7.3.2.32", "7.3.3.18")
-    val SUPPORTED_OVERSEA_VERSIONS = listOf("7.3.1.32")
+    val SUPPORTED_OVERSEA_VERSIONS = listOf("7.3.1.32", "7.3.5.32")
 
     data class Names(
         val profileId: String,
@@ -75,6 +75,8 @@ object TargetNames {
         val staticProgressIds: List<Int> = emptyList(),
 
         val pauseRestoreIds: List<Int> = emptyList(),
+
+        val seriesStaticIds: List<Int> = emptyList(),
 
         val doubleTapLikeView: String = "",
 
@@ -328,12 +330,108 @@ object TargetNames {
         pauseRestoreIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07, 0x7F0B05A6, 0x7F0B0597, 0x7F0B2983, 0x7F0B1FA3, 0x7F0B0FAE),
     )
 
+    internal val OVERSEA_73532 = Names(
+        profileId = "OVERSEA-7.3.5.32",
+        packageName = OVERSEA_PACKAGE,
+        versionName = "7.3.5.32",
+        useLegacySeedIds = false,
+        structuralFullscreenWatch = true,
+        seriesToolbarProfile = "oversea73132",
+        shortHolder = "ro4.d",
+        holderBaseS1 = "ro4.d",
+        shortStateMethod = "m2",
+        shortMaskMethod = "",
+        shortControlsMethod = "",
+        shortConfigMethod = "",
+        shortLayoutResetMethod = "s2",
+        shortLandscapeMethod = "",
+        shortMaskField = "",
+        shortNativeClearField = "",
+        shortCleanManagerField = "",
+        homeFragmentMaskMethod = "",
+        homeFragmentMaskField = "",
+        seriesFragmentRefreshMethod = "",
+        seriesPagerGetter = "eg",
+        seriesHolderGetter = "X0",
+        seriesLayoutFields = listOf("i", "j", "k", "l", "m", "q", "r", "w3", "x3"),
+        fixedToolbarShowMethod = "H",
+        customizeToolbarShowMethod = "F",
+        customizeToolbarApplyMethod = "G",
+        toolbarBase = "com.dragon.read.video.layer.a",
+        progressBar = "eh4.h1",
+        hideView1 = "",
+        hideView2 = "",
+        oledBright = "",
+        oledBrightAction = "",
+        topZoneTouch = "",
+        playbackState = "xy0.c",
+        adVideoEndShowMethod = "handleVideoEvent",
+        pauseAdEntryClass = "",
+        pauseAdEntryMethod = "",
+        resolutionController = "wj4.x",
+        resolutionModelMethods = listOf("selectVideoInfoToPlay"),
+        resolutionEngineField = "",
+        resolutionApplyMethod = "",
+
+        doubleTapHandlers = listOf("ro4.m", "ro4.k", "com.dragon.read.component.shortvideo.impl.fullscreen.f\$d"),
+        rightViewAgency = "com.dragon.read.component.shortvideo.impl.inject.view.w6",
+        rightViewAgencyEventMethod = "s",
+        kmpAcctService = listOf("com.dragon.read.kmp.service.p0"),
+        kmpVipModel = "sr5.e",
+        hideIdNames = listOf(
+            "right_interact_container",
+            "ly_tools_bar_icon",
+            "series_info_panel_container",
+            "top_header_constraint_layout",
+            "bottom_container",
+            "bottom_bar_container",
+            "short_series_catalog_view",
+            "more_operation_view",
+            "enter_episode_and_full_screen_container",
+        ),
+        progressIdNames = listOf("seek_bar_root"),
+
+        staticHideIds = listOf(0x7F0B26A1, 0x7F0B1F00, 0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598, 0x7F0B2A26, 0x7F0B2007, 0x7F0B0FCD),
+        staticProgressIds = listOf(0x7F0B290E),
+
+        pauseRestoreIds = listOf(0x7F0B26A1, 0x7F0B1F00, 0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598, 0x7F0B2A26, 0x7F0B2007, 0x7F0B0FCD),
+
+        seriesStaticIds = listOf(
+            0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598, 0x7F0B2A26, 0x7F0B2007,
+            0x7F0B0FCD, 0x7F0B0FCE, 0x7F0B26A1, 0x7F0B1F00,
+            0x7F0B1A24, 0x7F0B1A26, 0x7F0B2EF6, 0x7F0B2F01, 0x7F0B0BCF,
+        ),
+    )
+
     internal val CN: Names get() = CN_73132
     internal val OVERSEA: Names get() = OVERSEA_73132
 
     fun namesFor(pkg: String, versionName: String?, classLoader: ClassLoader? = null): Names {
-        if (pkg == OVERSEA_PACKAGE) return OVERSEA_73132
-        if (pkg != CN_PACKAGE) return CN_73132
+        if (pkg != CN_PACKAGE) {
+            if (pkg != OVERSEA_PACKAGE) return CN_73132
+
+            val overseaVersion = versionName?.trim()?.substringBefore(' ') ?: ""
+            val overseaByVersion = when (overseaVersion) {
+                "7.3.5.32" -> OVERSEA_73532
+                "7.3.1.32" -> OVERSEA_73132
+                else -> null
+            }
+            if (overseaByVersion != null) {
+                if (classLoader == null) return overseaByVersion
+                try {
+                    Class.forName(overseaByVersion.shortHolder, false, classLoader)
+                    return overseaByVersion
+                } catch (_: Throwable) {
+
+                }
+            }
+
+            if (classLoader != null) {
+                try { Class.forName(OVERSEA_73532.shortHolder, false, classLoader); return OVERSEA_73532 } catch (_: Throwable) {}
+                try { Class.forName(OVERSEA_73132.shortHolder, false, classLoader); return OVERSEA_73132 } catch (_: Throwable) {}
+            }
+            return overseaByVersion ?: OVERSEA_73132
+        }
 
         val normalized = versionName?.trim()?.substringBefore(' ') ?: ""
         val byVersion = when (normalized) {
