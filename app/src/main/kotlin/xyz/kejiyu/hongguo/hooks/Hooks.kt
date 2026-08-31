@@ -3702,6 +3702,9 @@ object Hooks {
 
                     setFieldValue(item, "i", true)
                     setFieldValue(item, "k", true)
+                    setFieldValue(item, "a", true)
+                    setFieldValue(item, "b", true)
+                    setFieldValue(item, "c", true)
                 }
                 "grouped-atomic-arrow" -> {
 
