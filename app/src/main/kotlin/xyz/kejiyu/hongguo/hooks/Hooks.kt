@@ -3223,60 +3223,6 @@ object Hooks {
         }
     }
 
-    private fun installPanelWatermark(target: View, ctx: Context, color: Int) {
-        try {
-            val text = "免费模块倒卖死全家"
-            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-
-                this.color = Color.argb(24, Color.red(color), Color.green(color), Color.blue(color))
-                textSize = 12.5f * ctx.resources.displayMetrics.scaledDensity
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            }
-            val gapX = dp(ctx, 54f).toFloat()
-            val gapY = dp(ctx, 72f).toFloat()
-            val drawable = object : android.graphics.drawable.Drawable() {
-                override fun draw(canvas: android.graphics.Canvas) {
-                    val b = bounds
-                    if (b.width() <= 0 || b.height() <= 0) return
-                    val save = canvas.save()
-                    canvas.rotate(-24f, b.exactCenterX(), b.exactCenterY())
-                    val textW = paint.measureText(text)
-                    val stepX = textW + gapX
-                    var row = 0
-                    var y = -b.height().toFloat()
-                    val maxY = b.height() * 2f
-                    while (y < maxY) {
-                        var x = -b.width().toFloat() - if (row % 2 == 0) 0f else stepX / 2f
-                        val maxX = b.width() * 2f
-                        while (x < maxX) {
-                            canvas.drawText(text, x, y, paint)
-                            x += stepX
-                        }
-                        y += gapY
-                        row++
-                    }
-                    canvas.restoreToCount(save)
-                }
-
-                override fun setAlpha(alpha: Int) { paint.alpha = alpha.coerceIn(0, 255) }
-                override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) { paint.colorFilter = colorFilter }
-                @Suppress("DEPRECATION")
-                override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
-            }
-            target.overlay.add(drawable)
-            target.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
-                drawable.setBounds(0, 0, v.width, v.height)
-                drawable.invalidateSelf()
-            }
-            target.post {
-                drawable.setBounds(0, 0, target.width, target.height)
-                drawable.invalidateSelf()
-            }
-        } catch (e: Throwable) {
-            LogUtil.error("面板水印", e)
-        }
-    }
-
     private fun targetCompatLabel(ctx: Context): String {
         try {
             @Suppress("DEPRECATION")
@@ -3530,8 +3476,6 @@ object Hooks {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ))
-
-            installPanelWatermark(shell, act, p.textSecondary)
 
             shell.alpha = 0f
             shell.translationY = dp(act, 18f).toFloat()

@@ -11,8 +11,8 @@ android {
         applicationId 'xyz.kejiyu.hongguo'
         minSdk 29
         targetSdk 34
-        versionCode 20260811
-        versionName "1.0.1"
+        versionCode 20260831
+        versionName "1.0.2"
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
 
