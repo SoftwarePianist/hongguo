@@ -199,6 +199,20 @@ object Hooks {
 
     private var gReceiverRegistered = false
     private var gCurrentActivity: Activity? = null
+    @Volatile private var gResumedShortSeriesFragment: java.lang.ref.WeakReference<Any>? = null
+
+    private val seriesDetailActivityNames = setOf(
+        "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
+        "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
+        "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity",
+    )
+
+    private fun shouldApplyUiHiding(): Boolean {
+        val name = gCurrentActivity?.javaClass?.name ?: return false
+        return if (name == "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity") {
+            gResumedShortSeriesFragment?.get() != null
+        } else name in seriesDetailActivityNames
+    }
 
     private val gTargetIdSet = mutableSetOf<Int>()
     private val gSeriesTargetIdSet = mutableSetOf<Int>()
@@ -689,7 +703,7 @@ object Hooks {
     }
 
     private fun hideRefreshAccessory(v: View?) {
-        if (v == null || !gMasterOn || !gRefreshOff) return
+        if (v == null || !shouldApplyUiHiding() || !gMasterOn || !gRefreshOff) return
         try {
             synchronized(gKnownRefreshAccessoryViews) { gKnownRefreshAccessoryViews[v] = true }
             if (v.visibility != View.GONE) {
@@ -842,7 +856,7 @@ object Hooks {
     }
 
     private fun collapseNativeMainBottomFrame(v: View?) {
-        if (v == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         if (!isNativeMainBottomFrame(v)) return
         try {
             synchronized(gKnownMainBottomNavViews) { gKnownMainBottomNavViews[v] = true }
@@ -863,7 +877,7 @@ object Hooks {
     }
 
     private fun collapseNativeVideoFeedBottomMask(v: View?) {
-        if (v == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         if (!isNativeVideoFeedBottomMask(v)) return
         try {
             synchronized(gKnownBottomBackdropViews) { gKnownBottomBackdropViews[v] = true }
@@ -921,7 +935,7 @@ object Hooks {
     }
 
     private fun enforceNativeMainBottomHidden(act: Activity?) {
-        if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (!shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         collapseNativeMainBottomFrame(findNativeMainBottomFrame(act))
     }
 
@@ -943,7 +957,7 @@ object Hooks {
     }
 
     private fun reclaimFeedViewportBottomMargin(pager: View?) {
-        if (pager == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (pager == null || !shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         try {
             val actName = gCurrentActivity?.javaClass?.simpleName ?: ""
             if (actName == "ShortSeriesActivity") return
@@ -1220,7 +1234,7 @@ object Hooks {
     }
 
     private fun collapseHomeBottomBackdrop(marker: View?) {
-        if (marker == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (marker == null || !shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
 
         if (isNativeVideoFeedBottomMask(marker) || isHomeBottomBackdropMarker(marker) || isKnownBottomBackdrop(marker)) {
             collapseNativeVideoFeedBottomMask(marker)
@@ -1294,7 +1308,7 @@ object Hooks {
         }
         try {
             v.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-                if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) return@addOnLayoutChangeListener
+                if (!shouldApplyUiHiding() || !gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) return@addOnLayoutChangeListener
                 val kind = seriesToolbarKind(view)
                 if (kind != 0) rememberSeriesToolbar(view, kind)
                 if (kind != 0 && view.visibility == View.VISIBLE) {
@@ -1372,7 +1386,7 @@ object Hooks {
     }
 
     private fun hideSeriesToolbarView(v: View?) {
-        if (v == null || !gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !shouldApplyUiHiding() || !gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) return
         val kind = seriesToolbarKind(v)
         if (kind == 0) return
         rememberSeriesToolbar(v, kind)
@@ -1425,7 +1439,7 @@ object Hooks {
     }
 
     private fun blindView(v: View?) {
-        if (v == null || !gMasterOn || (!gControlOn && !gPlayerOn) || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !shouldApplyUiHiding() || !gMasterOn || (!gControlOn && !gPlayerOn) || (gRestoreControlsOnPause && gVideoPaused)) return
         try {
 
             if (v.visibility != View.VISIBLE) return
@@ -1640,6 +1654,17 @@ object Hooks {
         }
     }
 
+    private fun restoreAfterSeriesDetailExit() {
+        mainHandler.post {
+            restoreShortVideoNativeControls()
+            restorePauseForcedViews()
+            restoreAllSavedViews()
+            setVideoToolbarsVisible(true)
+            applyCleanTop(gCurrentActivity)
+            applyNavBar(gCurrentActivity)
+        }
+    }
+
     private fun registerShortVideoHolder(holder: Any?, playbackState: Int? = null) {
         if (holder == null) return
         val now = android.os.SystemClock.uptimeMillis()
@@ -1828,7 +1853,7 @@ object Hooks {
     }
 
     private fun shouldForceShortVideoCleanMask(): Boolean {
-        return gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)
+        return shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)
     }
 
     private fun rememberAndForceShortVideoMaskInvisible(holder: Any) {
@@ -2062,6 +2087,7 @@ object Hooks {
     }
 
     private fun setVideoToolbarsVisible(visible: Boolean) {
+        if (!visible && !shouldApplyUiHiding()) return
         mainHandler.post {
             for (layer in videoToolbarLayerSnapshot()) {
                 setOneVideoToolbarVisible(layer, visible)
@@ -2252,7 +2278,7 @@ object Hooks {
         if (v == null || isInsideModuleUi(v)) return
         LogUtil.incr("scanTree")
 
-        val masterActive = gMasterOn && !(gRestoreControlsOnPause && gVideoPaused)
+        val masterActive = shouldApplyUiHiding() && gMasterOn && !(gRestoreControlsOnPause && gVideoPaused)
         if (masterActive) {
             if (gControlOn) {
                 if (isNativeMainBottomFrame(v)) { collapseNativeMainBottomFrame(v); return }
@@ -2332,7 +2358,7 @@ object Hooks {
     }
 
     private fun shouldHideStatusBar(): Boolean {
-        return gMasterOn && gStatusOn
+        return shouldApplyUiHiding() && gMasterOn && gStatusOn
     }
 
     private fun updateSeriesMallTopMargin(act: Activity, statusHidden: Boolean) {
@@ -2514,7 +2540,11 @@ object Hooks {
     }
 
     private fun applyCleanTop(act: Activity?) {
-        if (act == null || !gMasterOn || !gStatusOn) return
+        if (act == null) return
+        if (!shouldHideStatusBar()) {
+            showStatusBar(act)
+            return
+        }
         if (isWindowedMode(act)) {
             applyWindowedTop(act)
             return
@@ -2653,7 +2683,11 @@ object Hooks {
     }
 
     private fun applyNavBar(act: Activity?) {
-        if (act == null || !gMasterOn || !gNavBarOff) return
+        if (act == null) return
+        if (!shouldApplyUiHiding() || !gMasterOn || !gNavBarOff) {
+            showNavBar(act)
+            return
+        }
         applyBottomEdgeToEdge(act, true)
     }
     private fun showNavBar(act: Activity?) {
@@ -4460,6 +4494,26 @@ object Hooks {
                 registerShortSeriesFragment(chain.thisObject)
                 result
             }
+            ham(c, "onResume", "seriesFragment_onResume") { chain ->
+                val result = chain.proceed()
+                registerShortSeriesFragment(chain.thisObject)
+                gResumedShortSeriesFragment = java.lang.ref.WeakReference(chain.thisObject)
+                mainHandler.post {
+                    if (shouldApplyUiHiding()) {
+                        setVideoPaused(false, "series-fragment-onResume")
+                        scanAllWindows()
+                    }
+                }
+                result
+            }
+            ham(c, "onPause", "seriesFragment_onPause") { chain ->
+                val result = chain.proceed()
+                if (gResumedShortSeriesFragment?.get() === chain.thisObject) {
+                    gResumedShortSeriesFragment = null
+                }
+                restoreAfterSeriesDetailExit()
+                result
+            }
             ham(c, "onConfigurationChanged", "seriesFragment_onConfigurationChanged") { chain ->
                 val result = chain.proceed()
                 registerShortSeriesFragment(chain.thisObject)
@@ -4993,7 +5047,7 @@ object Hooks {
                     }
                 }
 
-                if (!gMasterOn || (gRestoreControlsOnPause && gVideoPaused)) return@ham chain.proceed()
+                if (!shouldApplyUiHiding() || !gMasterOn || (gRestoreControlsOnPause && gVideoPaused)) return@ham chain.proceed()
                 try {
                     LogUtil.incr("setVis")
                     if (targetVisibility == View.VISIBLE && view != null) {
@@ -5097,7 +5151,7 @@ object Hooks {
                     if (chain.getArg(0) as? Int == View.VISIBLE && gInternalViewMutation.get() != true) {
                         val v = chain.thisObject as? View
                         blocked = v != null && v.visibility != View.VISIBLE &&
-                            gMasterOn && (gControlOn || gPlayerOn) &&
+                            shouldApplyUiHiding() && gMasterOn && (gControlOn || gPlayerOn) &&
                             !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause()) &&
                             (quickMatch(v) || isProgressBar(v))
                     } else blocked = false
@@ -5152,6 +5206,9 @@ object Hooks {
                 val result = chain.proceed()
                 try {
                     if (a != null) {
+                        if (shouldApplyUiHiding()) {
+                            setVideoPaused(false, "series-detail-onResume")
+                        }
                         if (gMasterOn && gStatusOn) applyCleanTop(a)
                         if (gMasterOn && gNavBarOff) applyNavBar(a)
                         if (gNotificationMenuOn) createNotification(a)
