@@ -611,6 +611,56 @@ object Hooks {
         return out
     }
 
+    private val fullSeriesCountPattern = Regex("全\\d+集")
+    private val exactFullSeriesEntryPattern = Regex("^(观看完整漫剧|观看完整短剧|观看全集|完整剧集)全?\\d+集$")
+    private val exactFullSeriesCountPattern = Regex("^全\\d+集$")
+
+    private fun isFullSeriesEntryLabel(raw: String): Boolean {
+        val text = raw.replace(" ", "")
+        val lower = text.lowercase()
+        return text.contains("观看完整漫剧") || text.contains("观看完整短剧") ||
+            text.contains("观看全集") || text.contains("完整剧集") ||
+            lower.contains("watchall") || lower.contains("allepisodes") || lower.contains("fullseries") ||
+            (text.contains("观看") && fullSeriesCountPattern.containsMatchIn(text))
+    }
+
+    private fun hasExactFullSeriesEntryLabel(rawTexts: List<String>): Boolean {
+        val texts = rawTexts.map { raw -> raw.filterNot { it.isWhitespace() } }
+        if (texts.any(exactFullSeriesEntryPattern::matches)) return true
+        val hasTitle = texts.any { it == "观看完整漫剧" || it == "观看完整短剧" }
+        return hasTitle && texts.any(exactFullSeriesCountPattern::matches)
+    }
+
+    private fun hideFullSeriesEntryBeforeDraw(label: TextView?) {
+        if (label == null || gPkg != TargetNames.OVERSEA_PACKAGE || !gMasterOn || !gControlOn ||
+            (gRestoreControlsOnPause && gVideoPaused) || isInsideModuleUi(label)
+        ) return
+        val text = try { label.text?.toString().orEmpty() } catch (_: Throwable) { "" }
+        val normalized = text.filterNot { it.isWhitespace() }
+        if (!normalized.contains("观看完整漫剧") && !normalized.contains("观看完整短剧") &&
+            !exactFullSeriesCountPattern.matches(normalized)
+        ) return
+        var node = label.parent as? View
+        var depth = 0
+        while (node != null && depth++ < 8) {
+            if (node is ViewGroup && node.javaClass.name == "android.widget.FrameLayout" &&
+                viewEntryName(node) == "root_layout"
+            ) {
+                if (!hasExactFullSeriesEntryLabel(collectUiTexts(node, 5))) return
+                val first = synchronized(gKnownFullSeriesEntryViews) {
+                    if (gKnownFullSeriesEntryViews.containsKey(node)) false
+                    else true.also { gKnownFullSeriesEntryViews[node] = true }
+                }
+                if (first) {
+                    blindView(node)
+                    LogUtil.info("home full-series entry hidden before first draw")
+                }
+                return
+            }
+            node = node.parent as? View
+        }
+    }
+
     private fun isRefreshText(text: String): Boolean {
         val t = text.lowercase()
         return text.contains("下拉刷新") || text.contains("刷新内容") || text.contains("松开刷新") ||
@@ -679,11 +729,19 @@ object Hooks {
         if (v.javaClass.name != "android.widget.FrameLayout") return false
         if (viewEntryName(v) != "root_layout") return false
 
+        val texts = collectUiTexts(v, 5)
+        val matchedByText = texts.any(::isFullSeriesEntryLabel)
+
         val dm = try { v.resources.displayMetrics } catch (_: Throwable) { return false }
         val density = dm.density.coerceAtLeast(0.1f)
         val width = if (v.width > 0) v.width else v.measuredWidth
         val height = if (v.height > 0) v.height else v.measuredHeight
-        if (width <= 0 || height <= 0) return false
+        if (width <= 0 || height <= 0) {
+            if (gPkg != TargetNames.OVERSEA_PACKAGE || !hasExactFullSeriesEntryLabel(texts)) return false
+            synchronized(gKnownFullSeriesEntryViews) { gKnownFullSeriesEntryViews[v] = true }
+            LogUtil.info("home full-series entry recognized before layout")
+            return true
+        }
         val hDp = height / density
         if (hDp !in 41f..47.5f) return false
         if (width.toFloat() / dm.widthPixels.coerceAtLeast(1).toFloat() < 0.94f) return false
@@ -693,17 +751,7 @@ object Hooks {
 
         if (loc[1] < dm.heightPixels * 0.68f) return false
 
-        val texts = collectUiTexts(v, 5)
-        val matchedByText = texts.any { raw ->
-            val text = raw.replace(" ", "")
-            val lower = text.lowercase()
-            text.contains("观看完整漫剧") || text.contains("观看完整短剧") ||
-                text.contains("观看全集") || text.contains("完整剧集") ||
-                lower.contains("watchall") || lower.contains("allepisodes") || lower.contains("fullseries") ||
-                (text.contains("观看") && Regex("全\\d+集").containsMatchIn(text))
-        }
-        val matched = matchedByText || gPkg == TargetNames.OVERSEA_PACKAGE
-        if (!matched) return false
+        if (!matchedByText && gPkg != TargetNames.OVERSEA_PACKAGE) return false
 
         synchronized(gKnownFullSeriesEntryViews) { gKnownFullSeriesEntryViews[v] = true }
         LogUtil.info("home full-series entry recognized: root_layout, h=${"%.1f".format(hDp)}dp")
@@ -2062,6 +2110,7 @@ object Hooks {
     @Volatile private var gVideoStateEverSet = false
     @Volatile private var gLastHolderBindAt = 0L
     @Volatile private var gPauseStartedAt = 0L
+    @Volatile private var gLastPlayAt = 0L
     @Volatile private var gLastVideoModelAt = 0L
     @Volatile private var gLastUserClickAt = 0L
     @Volatile private var gTouchDownX = 0f
@@ -2072,6 +2121,16 @@ object Hooks {
         gPauseStartedAt > 0L && (gLastVideoModelAt > gPauseStartedAt || gLastHolderBindAt > gPauseStartedAt)
 
     private fun setVideoPaused(paused: Boolean, reason: String = "callback") {
+        val now = android.os.SystemClock.uptimeMillis()
+        val userPausedAfterPlay = gLastUserClickAt > gLastPlayAt && now - gLastUserClickAt < 800L
+        if (paused && !reason.contains("completed") &&
+            !userPausedAfterPlay &&
+            now - gLastPlayAt < 600L && now - gLastVideoModelAt < 1500L
+        ) {
+            LogUtil.info("stale pause ignored after new-video play: reason=$reason")
+            return
+        }
+        if (!paused) gLastPlayAt = now
         val first = !gVideoStateEverSet
         val changed = first || gVideoPaused != paused
         gVideoStateEverSet = true
@@ -2131,12 +2190,12 @@ object Hooks {
             if (gPlayerOn) setVideoToolbarsVisible(false)
             if (changed) {
                 LogUtil.info("video resumed: hide controls, reason=$reason")
-                mainHandler.post { scanAllWindows() }
                 if (first) {
                     mainHandler.postDelayed({ if (!gVideoPaused) scanAllWindows() }, 1200L)
                     mainHandler.postDelayed({ if (!gVideoPaused) scanAllWindows() }, 3000L)
                 }
             }
+            mainHandler.post { scanAllWindows() }
         }
     }
     private fun scanTreeRestore(v: View?) {
@@ -5032,6 +5091,19 @@ object Hooks {
             }
             LogUtil.info("  ✓ addView")
         } catch (e: Exception) { LogUtil.error("addView", e) }
+
+        try {
+            val c = Class.forName("android.widget.TextView", false, classLoader)
+            module.hook(c.getDeclaredMethod("setText", CharSequence::class.java, TextView.BufferType::class.java))
+                .setId("fullSeriesText")
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(Hooker { chain ->
+                    val result = chain.proceed()
+                    try { hideFullSeriesEntryBeforeDraw(chain.thisObject as? TextView) } catch (_: Throwable) {}
+                    result
+                })
+            LogUtil.info("  ✓ full-series label pre-draw guard")
+        } catch (e: Exception) { LogUtil.error("full-series label guard", e) }
 
         try {
             val c = Class.forName("com.dragon.read.recyler.AbsRecyclerViewHolder", false, classLoader)

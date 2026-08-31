@@ -28,6 +28,7 @@
   * `v7.3.2.32`
   * `v7.3.1.32`
 * **红果短剧（海外版 `com.phoenix.read.oversea.gp`）**
+  * `v7.3.5.32`
   * `v7.3.1.32`
 
 ---
@@ -88,6 +89,8 @@
 ├── gradle/
 │   ├── libs.versions.toml             # Gradle 依赖版本管理
 │   └── wrapper/                       # Gradle Wrapper 运行时文件
+├── docs/
+│   └── danmaku-force-fetch.md         # 弹幕强制拉取实验结论与后续方案
 ├── build.gradle                       # 项目根构建配置
 ├── gradle.properties                  # Gradle 全局属性配置
 └── settings.gradle                    # 项目 Module 引入配置
@@ -95,7 +98,13 @@
 
 ---
 
-## 6. 免责声明
+## 6. 开发文档
+
+- [短剧弹幕强制拉取：实验结论与后续开发方案](docs/danmaku-force-fetch.md)
+
+---
+
+## 7. 免责声明
 
 > **⚠️ 注意与声明**
 > 
