@@ -34,3 +34,20 @@
 - 字级阶梯：28sp（页题）/ 16sp（卡题）/ 14sp（控件）/ 13sp（正文）/ 12sp（说明）
 - 间距网格：4 / 8 / 12 / 14 / 16 / 20 / 24 / 32 dp，全部取自 4dp 基线
 - 大屏（sw≥600dp）页面左右边距 20dp → 48dp，内容保持居中呼吸
+
+---
+
+## 附：应用内面板（Hooks.kt 程序化 UI）同步改造
+
+同一套「晴空白」语言已同步到红果短剧 App 内部的模块面板（`panelPalette()` + 全部弹窗）：
+
+| 位置 | 改动 |
+|---|---|
+| PanelPalette | 新增 `accentEnd`；浅色暖白 / 深色暖墨双套色板，与模块主页完全一致 |
+| 面板外壳 / 弹窗 | 圆角 28/26 → 24（shell 级），卡片 22 → 20，开关行/选项行 20/16 → 14 |
+| 「完成」「保存」按钮 | 平涂 accent → 品牌渐变（`accentGradientBg`，LEFT_RIGHT） |
+| 分区标题 / 「当前兼容配置」 | 加 6% 字距；KEJIYU 页题 8% 字距 |
+| 开关行描述 / 弹窗副标题 | 11.5sp → 12sp；提示注 10.8sp → 11sp |
+| 设置页入口（footer 兜底视图） | 背景从目标 App 主题 `selectableItemBackground`（深色下发白）改为显式透明 + 自有 ripple |
+
+验证截图：`panel-light.png` / `panel-dark.png` / `settings-entry-dark.png`（PLK110 真机，OVERSEA-7.3.5.32）。

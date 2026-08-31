@@ -2854,6 +2854,7 @@ object Hooks {
         val text: Int,
         val textSecondary: Int,
         val accent: Int,
+        val accentEnd: Int,
         val accentSoft: Int,
         val divider: Int,
         val switchOffThumb: Int,
@@ -2869,31 +2870,35 @@ object Hooks {
         val night = ((ctx.resources.configuration.uiMode and 0x30) == 0x20)
         gIsNight = night
         return if (night) {
+            // 晴空白 · 暖墨夜色：深而不闷，层与层之间保持可感知的明度阶梯
             PanelPalette(
-                page = safeRgb(15, 17, 20),
-                surface = safeRgb(25, 28, 32),
-                surfaceAlt = safeRgb(35, 39, 45),
-                text = safeRgb(245, 247, 250),
-                textSecondary = safeRgb(167, 175, 186),
-                accent = safeRgb(255, 107, 74),
-                accentSoft = safeRgb(52, 35, 31),
-                divider = safeArgb(30, 255, 255, 255),
-                switchOffThumb = safeRgb(210, 214, 220),
-                switchOffTrack = safeRgb(84, 90, 99),
-                switchOnTrack = safeRgb(151, 72, 55),
+                page = safeRgb(20, 18, 16),
+                surface = safeRgb(30, 27, 24),
+                surfaceAlt = safeRgb(38, 34, 31),
+                text = safeRgb(245, 243, 240),
+                textSecondary = safeRgb(168, 158, 148),
+                accent = safeRgb(255, 122, 92),
+                accentEnd = safeRgb(255, 154, 122),
+                accentSoft = safeRgb(58, 36, 30),
+                divider = safeArgb(26, 255, 255, 255),
+                switchOffThumb = safeRgb(212, 206, 200),
+                switchOffTrack = safeRgb(88, 80, 74),
+                switchOnTrack = safeRgb(160, 82, 62),
             )
         } else {
+            // 晴空白 · 暖白纸面：明亮清爽，告别灰暗
             PanelPalette(
-                page = safeRgb(246, 247, 249),
+                page = safeRgb(250, 249, 248),
                 surface = safeRgb(255, 255, 255),
-                surfaceAlt = safeRgb(241, 243, 246),
-                text = safeRgb(23, 25, 28),
-                textSecondary = safeRgb(108, 115, 126),
+                surfaceAlt = safeRgb(245, 243, 241),
+                text = safeRgb(28, 25, 23),
+                textSecondary = safeRgb(138, 131, 124),
                 accent = safeRgb(255, 90, 60),
+                accentEnd = safeRgb(255, 138, 92),
                 accentSoft = safeRgb(255, 237, 232),
                 divider = safeArgb(20, 0, 0, 0),
-                switchOffThumb = safeRgb(247, 247, 248),
-                switchOffTrack = safeRgb(194, 199, 206),
+                switchOffThumb = safeRgb(248, 247, 246),
+                switchOffTrack = safeRgb(207, 200, 194),
                 switchOnTrack = safeRgb(255, 168, 150),
             )
         }
@@ -2905,6 +2910,14 @@ object Hooks {
             setColor(color)
             cornerRadius = dp(ctx, radiusDp).toFloat()
             if (strokeColor != null && strokeDp > 0f) setStroke(dp(ctx, strokeDp), strokeColor)
+        }
+    }
+
+    /** 品牌朱砂渐变：全面板仅主动作按钮使用，一处点睛 */
+    private fun accentGradientBg(ctx: Context, p: PanelPalette, radiusDp: Float): GradientDrawable {
+        return GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(p.accent, p.accentEnd)).apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(ctx, radiusDp).toFloat()
         }
     }
 
@@ -2926,6 +2939,7 @@ object Hooks {
         textSize = 12f
         setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         setTextColor(p.textSecondary)
+        letterSpacing = 0.06f
         isAllCaps = false
         setPadding(dp(ctx, 4f), dp(ctx, 18f), dp(ctx, 4f), dp(ctx, 5f))
     }
@@ -2943,7 +2957,7 @@ object Hooks {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(ctx, 15f), dp(ctx, 12f), dp(ctx, 12f), dp(ctx, 12f))
-            background = roundedBg(ctx, if (emphasis) p.accentSoft else p.surfaceAlt, 20f)
+            background = roundedBg(ctx, if (emphasis) p.accentSoft else p.surfaceAlt, 14f)
             minimumHeight = dp(ctx, 64f)
         }
         val labels = LinearLayout(ctx).apply {
@@ -2959,7 +2973,7 @@ object Hooks {
         })
         labels.addView(TextView(ctx).apply {
             text = description
-            textSize = 11.5f
+            textSize = 12f
             setTextColor(p.textSecondary)
             includeFontPadding = false
             setPadding(0, dp(ctx, 4f), dp(ctx, 6f), 0)
@@ -3000,7 +3014,7 @@ object Hooks {
             val root = LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(act, 18f), dp(act, 18f), dp(act, 18f), dp(act, 16f))
-                background = roundedBg(act, p.page, 26f, p.divider, 1f)
+                background = roundedBg(act, p.page, 24f, p.divider, 1f)
                 markAsModuleUi(this)
             }
             root.addView(TextView(act).apply {
@@ -3012,7 +3026,7 @@ object Hooks {
             })
             root.addView(TextView(act).apply {
                 text = "选择后立即生效，并记住为以后播放的默认速度"
-                textSize = 11.5f
+                textSize = 12f
                 setTextColor(p.textSecondary)
                 includeFontPadding = false
                 setPadding(0, dp(act, 6f), 0, dp(act, 10f))
@@ -3024,7 +3038,7 @@ object Hooks {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(dp(act, 15f), dp(act, 12f), dp(act, 15f), dp(act, 12f))
-                    background = roundedBg(act, if (selected) p.accentSoft else p.surfaceAlt, 16f)
+                    background = roundedBg(act, if (selected) p.accentSoft else p.surfaceAlt, 14f)
                     minimumHeight = dp(act, 50f)
                 }
                 row.addView(TextView(act).apply {
@@ -3092,7 +3106,7 @@ object Hooks {
             val root = LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(act, 18f), dp(act, 18f), dp(act, 18f), dp(act, 16f))
-                background = roundedBg(act, p.page, 26f, p.divider, 1f)
+                background = roundedBg(act, p.page, 24f, p.divider, 1f)
                 markAsModuleUi(this)
             }
             root.addView(TextView(act).apply {
@@ -3104,7 +3118,7 @@ object Hooks {
             })
             root.addView(TextView(act).apply {
                 text = "默认 99999。测试时可以改成 2、3 等小数值。"
-                textSize = 11.5f
+                textSize = 12f
                 setTextColor(p.textSecondary)
                 includeFontPadding = false
                 setPadding(0, dp(act, 6f), 0, dp(act, 12f))
@@ -3142,7 +3156,7 @@ object Hooks {
 
             root.addView(TextView(act).apply {
                 text = "修改数值后需要强停红果并重新打开，确保主进程和 :downloader 的缓存配置全部刷新。"
-                textSize = 10.8f
+                textSize = 11f
                 setTextColor(p.accent)
                 includeFontPadding = false
                 setPadding(dp(act, 2f), dp(act, 12f), dp(act, 2f), dp(act, 4f))
@@ -3158,7 +3172,7 @@ object Hooks {
                 textSize = 14f
                 gravity = Gravity.CENTER
                 setTextColor(p.text)
-                background = roundedBg(act, p.surfaceAlt, 12f)
+                background = roundedBg(act, p.surfaceAlt, 14f)
                 setOnClickListener { dialog.dismiss() }
             }
             val save = TextView(act).apply {
@@ -3167,7 +3181,7 @@ object Hooks {
                 gravity = Gravity.CENTER
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                 setTextColor(Color.WHITE)
-                background = roundedBg(act, p.accent, 12f)
+                background = accentGradientBg(act, p, 14f)
                 setOnClickListener {
                     val episode = episodeField.text?.toString()?.trim()?.toIntOrNull()
                     val series = seriesField.text?.toString()?.trim()?.toIntOrNull()
@@ -3287,7 +3301,7 @@ object Hooks {
             val content = LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(act, 16f), dp(act, 8f), dp(act, 16f), dp(act, 18f))
-                background = roundedBg(act, p.page, 28f)
+                background = roundedBg(act, p.page, 24f)
                 markAsModuleUi(this)
             }
 
@@ -3300,6 +3314,7 @@ object Hooks {
                 textSize = 25f
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                 setTextColor(p.text)
+                letterSpacing = 0.08f
                 includeFontPadding = false
             })
             header.addView(TextView(act).apply {
@@ -3313,13 +3328,14 @@ object Hooks {
 
             content.addView(LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
-                background = roundedBg(act, p.surface, 22f, p.divider, 1f)
+                background = roundedBg(act, p.surface, 20f, p.divider, 1f)
                 setPadding(dp(act, 15f), dp(act, 13f), dp(act, 15f), dp(act, 13f))
                 addView(TextView(act).apply {
                     text = "当前兼容配置"
                     textSize = 11f
                     setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                     setTextColor(p.accent)
+                    letterSpacing = 0.06f
                     includeFontPadding = false
                 })
                 addView(TextView(act).apply {
@@ -3470,7 +3486,7 @@ object Hooks {
             dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
             val shell = LinearLayout(act).apply {
                 orientation = LinearLayout.VERTICAL
-                background = roundedBg(act, p.page, 28f, p.divider, 1f)
+                background = roundedBg(act, p.page, 24f, p.divider, 1f)
                 clipToPadding = false
             }
             shell.addView(scroll, LinearLayout.LayoutParams(
@@ -3489,7 +3505,7 @@ object Hooks {
                 gravity = Gravity.CENTER
                 setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                 setTextColor(Color.WHITE)
-                background = roundedBg(act, p.accent, 18f)
+                background = accentGradientBg(act, p, 14f)
                 isClickable = true
                 isFocusable = true
                 minimumHeight = dp(act, 46f)
@@ -3766,13 +3782,14 @@ object Hooks {
             markAsModuleUi(this)
             isClickable = true
             isFocusable = true
+            // 背景显式透明 + 自有 ripple：不依赖目标 App 主题，避免深色模式下底色发白
             try {
-                val tv = android.util.TypedValue()
-                if (act.theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true) && tv.resourceId != 0) {
-                    setBackgroundResource(tv.resourceId)
-                } else {
-                    background = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
-                }
+                val rippleColor = safeArgb(30, Color.red(p.textSecondary), Color.green(p.textSecondary), Color.blue(p.textSecondary))
+                background = android.graphics.drawable.RippleDrawable(
+                    ColorStateList.valueOf(rippleColor),
+                    android.graphics.drawable.ColorDrawable(Color.TRANSPARENT),
+                    android.graphics.drawable.ColorDrawable(Color.WHITE),
+                )
             } catch (_: Throwable) {
                 background = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
             }
