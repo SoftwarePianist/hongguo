@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 子项依次入场，间隔 60ms，克制而有节奏 -->
+<layoutAnimation xmlns:android="http://schemas.android.com/apk/res/android"
+    android:animation="@anim/item_fade_slide_in"
+    android:animationOrder="normal"
+    android:delay="0.06" />

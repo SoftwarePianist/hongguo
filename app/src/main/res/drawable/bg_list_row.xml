@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 列表行：默认透明融入卡面，按压时泛起克制的暖色涟漪 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/accent_soft">
+    <item android:drawable="@android:color/transparent" />
+</ripple>

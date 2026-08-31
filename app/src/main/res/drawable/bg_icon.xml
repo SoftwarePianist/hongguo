@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 图标徽章：柔和的品牌暖色渐变底 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="@color/accent_soft" />
-    <corners android:radius="24dp" />
+    <gradient
+        android:angle="135"
+        android:startColor="@color/accent_soft"
+        android:endColor="@color/accent_soft_end" />
+    <corners android:radius="20dp" />
 </shape>

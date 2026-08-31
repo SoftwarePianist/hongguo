@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 间距网格：全部取自 4dp 基线 -->
+    <dimen name="page_padding_h">20dp</dimen>
+    <dimen name="page_padding_top">24dp</dimen>
+    <dimen name="page_padding_bottom">32dp</dimen>
+    <dimen name="card_padding">18dp</dimen>
+    <dimen name="card_gap">14dp</dimen>
+    <dimen name="card_radius">20dp</dimen>
+    <dimen name="control_radius">14dp</dimen>
+    <dimen name="inset_radius">12dp</dimen>
+</resources>

@@ -1,15 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="app_bg">#F6F7F9</color>
+    <!-- 纸面与器物：暖白底 + 纯白卡，层次靠发丝描边而非灰暗色块 -->
+    <color name="app_bg">#FFFAF9F8</color>
     <color name="surface">#FFFFFFFF</color>
-    <color name="surface_muted">#FFF0F2F5</color>
-    <color name="text_primary">#FF17191C</color>
-    <color name="text_secondary">#FF737983</color>
+    <color name="surface_muted">#FFF5F3F1</color>
+
+    <!-- 铭文：温润深褐黑 + 雅致石灰暖灰 -->
+    <color name="text_primary">#FF1C1917</color>
+    <color name="text_secondary">#FF8A837C</color>
+
+    <!-- 品牌朱砂：全页唯一的色彩主权 -->
     <color name="accent">#FFFF5A3C</color>
-    <color name="accent_pressed">#FFE94A2D</color>
-    <color name="accent_soft">#FFFFECE7</color>
-    <color name="success">#FF22A06B</color>
-    <color name="divider">#14000000</color>
-    <color name="button_secondary">#FFEDEFF3</color>
-    <color name="border">#1A000000</color>
+    <color name="accent_end">#FFFF8A5C</color>
+    <color name="accent_pressed">#FFE8482B</color>
+    <color name="accent_soft">#FFFFEDE8</color>
+    <color name="accent_soft_end">#FFFFE0D4</color>
+
+    <color name="success">#FF1F9D66</color>
+
+    <!-- 发丝描边与分隔 -->
+    <color name="divider">#0F000000</color>
+    <color name="divider_strong">#33000000</color>
+    <color name="border">#14000000</color>
+    <color name="button_secondary">#FFF5F3F1</color>
 </resources>

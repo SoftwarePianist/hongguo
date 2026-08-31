@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 大屏（平板 / 折叠屏展开）：加宽页边距，保持内容呼吸感 -->
+    <dimen name="page_padding_h">48dp</dimen>
+    <dimen name="page_padding_top">40dp</dimen>
+    <dimen name="card_gap">18dp</dimen>
+</resources>
