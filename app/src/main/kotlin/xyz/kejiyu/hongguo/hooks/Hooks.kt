@@ -205,7 +205,24 @@ object Hooks {
         "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity",
         "com.dragon.read.component.shortvideo.impl.seriesdetail.ShortSeriesDetailActivity",
         "com.dragon.read.component.shortvideo.impl.albumdetail.VideoAlbumDetailActivity",
+        "com.dragon.read.component.shortvideo.impl.fullscreen.ShortSeriesLandActivity",
     )
+
+    private fun isLandscapeFullscreenActivity(act: Activity?): Boolean {
+        if (act == null) return false
+        val name = act.javaClass.name
+        if (name == "com.dragon.read.component.shortvideo.impl.fullscreen.ShortSeriesLandActivity" ||
+            name.contains(".fullscreen.") ||
+            name.endsWith("LandActivity")
+        ) return true
+        val orientation = try { act.resources?.configuration?.orientation } catch (_: Throwable) { null }
+        return orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    }
+
+    private fun isSeriesDetailActivity(act: Activity?): Boolean {
+        if (act == null) return false
+        return act.javaClass.name in seriesDetailActivityNames
+    }
 
     private fun shouldApplyUiHiding(): Boolean {
         val name = gCurrentActivity?.javaClass?.name ?: return false
@@ -563,7 +580,6 @@ object Hooks {
             }
             if (isFullscreenWatchControl(v)) { LogUtil.incr("matchHit"); return true }
             if (isKnownFullSeriesEntry(v) || isHomeFullSeriesEntry(v)) { LogUtil.incr("matchHit"); return true }
-            if (isKnownBottomBackdrop(v) || isHomeBottomBackdropMarker(v)) { LogUtil.incr("matchHit"); return true }
         }
         return false
     }
@@ -1656,6 +1672,7 @@ object Hooks {
 
     private fun restoreAfterSeriesDetailExit() {
         mainHandler.post {
+            if (shouldApplyUiHiding()) return@post
             restoreShortVideoNativeControls()
             restorePauseForcedViews()
             restoreAllSavedViews()
@@ -1916,9 +1933,7 @@ object Hooks {
             return
         }
 
-        if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) {
-            for ((holder, _) in holders) restoreForcedShortVideoMask(holder)
-        }
+        for ((holder, _) in holders) restoreForcedShortVideoMask(holder)
     }
 
     private fun registerCnHomeFragment(fragment: Any?) {
@@ -1958,9 +1973,20 @@ object Hooks {
     }
 
     private fun syncCnHomeFragmentMasks() {
-        if (gPkg != "com.phoenix.read" || !shouldForceShortVideoCleanMask()) return
-        for (fragment in cnHomeFragmentSnapshot().asReversed()) {
-            forceCnHomeFragmentMaskInvisible(fragment)
+        if (gPkg != "com.phoenix.read") return
+        if (shouldForceShortVideoCleanMask()) {
+            for (fragment in cnHomeFragmentSnapshot().asReversed()) {
+                forceCnHomeFragmentMaskInvisible(fragment)
+            }
+        } else {
+            for (fragment in cnHomeFragmentSnapshot().asReversed()) {
+                try {
+                    val fieldName = gNames.homeFragmentMaskField
+                    if (fieldName.isBlank()) continue
+                    val mask = findFieldValue(fragment, fieldName) as? View ?: continue
+                    restoreView(mask)
+                } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -2280,13 +2306,6 @@ object Hooks {
 
         val masterActive = shouldApplyUiHiding() && gMasterOn && !(gRestoreControlsOnPause && gVideoPaused)
         if (masterActive) {
-            if (gControlOn) {
-                if (isNativeMainBottomFrame(v)) { collapseNativeMainBottomFrame(v); return }
-                if (isNativeVideoFeedBottomMask(v)) { collapseNativeVideoFeedBottomMask(v); return }
-                if (isHomeBottomBackdropMarker(v)) { collapseHomeBottomBackdrop(v); return }
-                if (isKnownBottomBackdrop(v)) { blindView(v); return }
-                if (isMainBottomNavContainer(v)) { blindView(v); return }
-            }
             if ((gControlOn || gPlayerOn) && quickMatch(v)) { blindView(v); return }
             if (gPlayerOn && seriesToolbarKind(v) != 0) { hideSeriesToolbarView(v); return }
             if (gProgressOff && isProgressBar(v)) {
@@ -2298,7 +2317,7 @@ object Hooks {
             }
             if (gRefreshOff && isRefreshAccessoryContainer(v)) { hideRefreshAccessory(v); return }
         } else {
-            if ((quickMatch(v) || isKnownMainBottomNav(v) || isKnownFullSeriesEntry(v) || isKnownBottomBackdrop(v)) && !isRedGuoAd(v)) {
+            if ((quickMatch(v) || isKnownFullSeriesEntry(v)) && !isRedGuoAd(v)) {
                 restoreView(v)
             }
             if (isProgressBar(v)) restoreView(v)
@@ -2540,9 +2559,11 @@ object Hooks {
     }
 
     private fun applyCleanTop(act: Activity?) {
-        if (act == null) return
+        if (act == null || !isSeriesDetailActivity(act)) return
         if (!shouldHideStatusBar()) {
-            showStatusBar(act)
+            if (!isLandscapeFullscreenActivity(act)) {
+                showStatusBar(act)
+            }
             return
         }
         if (isWindowedMode(act)) {
@@ -2591,7 +2612,7 @@ object Hooks {
         } catch (_: Exception) {}
     }
     private fun showStatusBar(act: Activity?) {
-        if (act == null) return
+        if (act == null || !isSeriesDetailActivity(act) || isLandscapeFullscreenActivity(act)) return
         try {
             val window = act.window ?: return
             val decor = window.decorView
@@ -2683,15 +2704,17 @@ object Hooks {
     }
 
     private fun applyNavBar(act: Activity?) {
-        if (act == null) return
+        if (act == null || !isSeriesDetailActivity(act)) return
         if (!shouldApplyUiHiding() || !gMasterOn || !gNavBarOff) {
-            showNavBar(act)
+            if (!isLandscapeFullscreenActivity(act)) {
+                showNavBar(act)
+            }
             return
         }
         applyBottomEdgeToEdge(act, true)
     }
     private fun showNavBar(act: Activity?) {
-        if (act == null) return
+        if (act == null || !isSeriesDetailActivity(act) || isLandscapeFullscreenActivity(act)) return
         try {
             val decor = act.window.decorView
             if (Build.VERSION.SDK_INT >= 30) decor.windowInsetsController?.show(WindowInsets.Type.navigationBars())
@@ -4032,7 +4055,7 @@ object Hooks {
                     ham(mainClazz, methodName, "nativeBottomFrame_${pkg.hashCode()}_$index") { chain ->
                         val act = chain.thisObject as? Activity
                         val result = chain.proceed()
-                        if (act != null && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                        if (act != null && shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                             mainHandler.post { enforceNativeMainBottomHidden(act) }
                         }
                         result
@@ -4048,7 +4071,7 @@ object Hooks {
                 ham(bottomFrameClazz, "setBottomTabBackground", "nativeBottomBackground_${pkg.hashCode()}") { chain ->
                     val frame = chain.thisObject as? View
                     val result = chain.proceed()
-                    if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                    if (shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                         updateNativeNavBarRestoreColor(gCurrentActivity)
                         collapseNativeMainBottomFrame(frame)
                         applyBottomEdgeToEdge(gCurrentActivity, gNavBarOff)
@@ -4089,7 +4112,7 @@ object Hooks {
                     .intercept(Hooker { chain ->
                         val root = try { chain.getArg(0) as? View } catch (_: Throwable) { null }
                         val result = chain.proceed()
-                        if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                        if (shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                             try {
 
                                 val controllerMask = findFieldValue(chain.thisObject, "h") as? View
@@ -4129,12 +4152,12 @@ object Hooks {
                     val result = try { chain.proceed() } finally {
                         if (exactOldFeed) gInsideFeedBottomMarginWrite.set(oldMarker)
                     }
-                    if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                    if (shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
 
                         if (gNames.profileId == "CN-7.3.2.32" || gNames.profileId == "CN-7.3.1.32") {
                             for (delay in longArrayOf(0L, 32L, 120L)) {
                                 mainHandler.postDelayed({
-                                    if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                                    if (shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                                         reclaimFeedViewportBottomMargin(root)
                                         enforceKnownFeedViewportBottomMargin()
                                     }
@@ -4149,11 +4172,11 @@ object Hooks {
 
                 ham(feedClazz, "onConfigurationChanged", "feedViewportConfig_${pkg.hashCode()}") { chain ->
                     val result = chain.proceed()
-                    if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                    if (shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                         val root = try { gCurrentActivity?.window?.decorView } catch (_: Throwable) { null }
                         for (delay in longArrayOf(0L, 24L, 90L, 180L)) {
                             mainHandler.postDelayed({
-                                if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
+                                if (shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                                     reclaimFeedViewportBottomMargin(root)
                                     enforceKnownFeedViewportBottomMargin()
                                 }
@@ -5060,22 +5083,7 @@ object Hooks {
                                 synchronized(gKnownRefreshAccessoryViews) { gKnownRefreshAccessoryViews[view] = true }
                                 View.GONE
                             }
-                            gControlOn && isNativeMainBottomFrame(view) -> {
-                                synchronized(gKnownMainBottomNavViews) { gKnownMainBottomNavViews[view] = true }
-                                View.GONE
-                            }
-                            gControlOn && isNativeVideoFeedBottomMask(view) -> {
-                                synchronized(gKnownBottomBackdropViews) { gKnownBottomBackdropViews[view] = true }
-                                mainHandler.post { enforceNativeMainBottomHidden(gCurrentActivity) }
-                                View.GONE
-                            }
-                            gControlOn && isHomeBottomBackdropMarker(view) -> {
-                                mainHandler.post { collapseHomeBottomBackdrop(view) }
-                                View.GONE
-                            }
                             (gControlOn || gPlayerOn) && quickMatch(view) ->
-                                if (shouldCollapseControl(view)) View.GONE else View.INVISIBLE
-                            gControlOn && (isKnownMainBottomNav(view) || isMainBottomNavContainer(view) || isKnownBottomBackdrop(view)) ->
                                 if (shouldCollapseControl(view)) View.GONE else View.INVISIBLE
                             gProgressOff && isProgressBar(view) -> View.GONE
                             else -> null
@@ -5154,9 +5162,11 @@ object Hooks {
                     if (chain.getArg(0) as? Int == View.VISIBLE && gInternalViewMutation.get() != true) {
                         val v = chain.thisObject as? View
                         blocked = v != null && v.visibility != View.VISIBLE &&
-                            shouldApplyUiHiding() && gMasterOn && (gControlOn || gPlayerOn) &&
-                            !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause()) &&
-                            (quickMatch(v) || isProgressBar(v))
+                            shouldApplyUiHiding() && gMasterOn && (
+                                ((gControlOn || gPlayerOn) && quickMatch(v)) ||
+                                (gProgressOff && isProgressBar(v))
+                            ) &&
+                            !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())
                     } else blocked = false
                     if (blocked) {
                         LogUtil.incr("showBlock")
