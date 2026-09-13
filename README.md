@@ -28,8 +28,17 @@
   * `v7.3.2.32`
   * `v7.3.1.32`
 * **红果短剧（海外版 `com.phoenix.read.oversea.gp`）**
+  * `v7.3.7.32`
   * `v7.3.5.32`
   * `v7.3.1.32`
+
+> 版本适配说明：目标 App 每次发版都会重新混淆类名，模块的映射表需要同步维护。
+> **但混淆类名并非唯一锚点**——R8 keep 的方法名（`onDoubleTap` / `setPlaySpeed` /
+> `onPlaybackStateChanged` …）跨版本稳定，模块会以它们为锚在运行时反查宿主类，
+> 因此多数小版本升级可零改动直接适配。
+> 机制详见 [版本自适应机制设计](docs/version-adaptation-design.md)；
+> 重定位流程与工具见 [混淆类名重定位工具](tools/dex_index.py) 与
+> [海外版 7.3.7.32 适配修复报告](docs/oversea-73732-fix-report.md)。
 
 ---
 
@@ -85,12 +94,21 @@
 │           ├── UpdateChecker.kt       # 模块更新检测服务
 │           └── hooks/
 │               ├── Hooks.kt           # 核心 Hook 业务逻辑与设置面板 UI
-│               └── TargetNames.kt     # 目标版本混淆类名/方法名兼容映射表
+│               ├── TargetNames.kt     # 目标版本混淆类名/方法名兼容映射表 + 指纹校验
+│               ├── AnchorResolver.kt  # 方法名锚点解析（反查宿主类，跨版本自愈）
+│               └── DexMethodIndex.kt  # 运行时 dex 方法表解析器（纯字节，不加载类）
 ├── gradle/
 │   ├── libs.versions.toml             # Gradle 依赖版本管理
 │   └── wrapper/                       # Gradle Wrapper 运行时文件
+├── tools/
+│   └── dex_index.py                   # 混淆类名重定位工具（方法名 -> 宿主类反查）
 ├── docs/
-│   └── danmaku-force-fetch.md         # 弹幕强制拉取实验结论与后续方案
+│   ├── danmaku-force-fetch.md         # 弹幕强制拉取实验结论与后续方案
+│   ├── version-adaptation-design.md   # 版本自适应机制设计（指纹/锚点/告警三层）
+│   ├── oversea-73732-compat-analysis.md  # 海外版 7.3.7.32 功能失效根因分析
+│   ├── oversea-73732-fix-report.md    # 海外版 7.3.7.32 适配修复报告（含验证）
+│   ├── oversea-73732-obfuscation-fill.md # 7.3.7.32 纯混淆方法名补全记录（逐项取证）
+│   └── settings-entry-fix.md          # 设置页入口修复（动态模板注入 / 兜底样式）
 ├── build.gradle                       # 项目根构建配置
 ├── gradle.properties                  # Gradle 全局属性配置
 └── settings.gradle                    # 项目 Module 引入配置
@@ -100,6 +118,9 @@
 
 ## 6. 开发文档
 
+- [版本自适应机制设计：指纹校验 / 方法名锚点 / 显式告警](docs/version-adaptation-design.md)
+- [设置页入口修复：原生条目动态注入 + 兜底样式](docs/settings-entry-fix.md)
+- [7.3.7.32 纯混淆方法名补全记录：无锚点时的取证方法（资源 ID 反查 / 调用约定比对）](docs/oversea-73732-obfuscation-fill.md)
 - [短剧弹幕强制拉取：实验结论与后续开发方案](docs/danmaku-force-fetch.md)
 
 ---

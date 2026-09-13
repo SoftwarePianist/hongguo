@@ -5,7 +5,7 @@ object TargetNames {
     const val CN_PACKAGE = "com.phoenix.read"
     const val OVERSEA_PACKAGE = "com.phoenix.read.oversea.gp"
     val SUPPORTED_CN_VERSIONS = listOf("7.3.1.32", "7.3.2.32", "7.3.3.18")
-    val SUPPORTED_OVERSEA_VERSIONS = listOf("7.3.1.32", "7.3.5.32")
+    val SUPPORTED_OVERSEA_VERSIONS = listOf("7.3.1.32", "7.3.5.32", "7.3.7.32")
 
     data class Names(
         val profileId: String,
@@ -81,6 +81,16 @@ object TargetNames {
         val doubleTapLikeView: String = "",
 
         val doubleTapHolderLikeMethod: String = "",
+
+        // ── 候选类列表（按顺序取第一个「签名校验通过」的类）──────────────
+        // 混淆类名每次发版都可能变；保留方法名（setPlaySpeed / getCurrentPlaySpeed
+        // / setSpeed / selectVideoInfoToPlay …）跨版本稳定，因此用「候选 + 运行时
+        // 签名校验」替代硬编码单一名，可显著降低升级后失效概率。
+        val percentPlayerCandidates: List<String> = emptyList(),
+        val speedControllerCandidates: List<String> = emptyList(),
+        val speedControllerSetMethod: String = "",
+        val speedControllerCacheMethod: String = "",
+        val floatPlayerCandidates: List<String> = emptyList(),
     )
 
     internal val CN_73132 = Names(
@@ -403,66 +413,308 @@ object TargetNames {
         ),
     )
 
+    internal val OVERSEA_73732 = Names(
+        profileId = "OVERSEA-7.3.7.32",
+        packageName = OVERSEA_PACKAGE,
+        versionName = "7.3.7.32",
+        useLegacySeedIds = false,
+        structuralFullscreenWatch = true,
+        seriesToolbarProfile = "oversea73132",
+
+        // 7.3.7.32 短剧 Holder：com.dragon.read.recyler.AbsRecyclerViewHolder 子类，
+        // 且其内部类 i$d 实现 onDoubleTap(MotionEvent)。旧表的 ro4.d 在该版本已变成
+        // 一个 URL 缓存类（父类 java.lang.Object），属「同名不同类」，必须替换。
+        shortHolder = "com.dragon.read.component.shortvideo.impl.fullscreen.i",
+        holderBaseS1 = "com.dragon.read.component.shortvideo.impl.fullscreen.i",
+
+        // ── 7.3.7.32 短剧 Holder 内部方法/字段（本次逐个反编译确认，非沿用旧表）──
+        // 依据：反编译 fullscreen.i（83 个方法）+ 用 aapt2 反查资源 ID 名称。
+        //   shortStateMethod  = l2(pz4.f,int)V   —— i==2 分支走 "pause"，i==1 走 playing，
+        //                        与旧表 S1/m2 的「播放状态回调」角色一致（原表名已随发版失效）。
+        //   shortControlsMethod = sd(bool,bool)V —— 内部走 f.m(!z)/f.q(!z,z2)，
+        //                        而 f.m(z) 里是 setImmersiveMode(!z)，故 sd(false,*) = 显示控件、
+        //                        sd(true,*) = 进沉浸（清屏）。与旧表 Y9 的调用约定 (false,true)=显示
+        //                        完全一致，因此 Hooks 里「arg0=false 就改成 true」的强制清屏逻辑成立。
+        //   shortCleanManagerField = K3(pr4.d)   —— pr4.d 是锁屏/清屏控件（含 unlock_speed 动画、
+        //                        getLockStatus()），有 b(bool) 显示 / a(bool) 隐藏，对应 Hooks 里
+        //                        「退出清屏时调 b(false)」。
+        //   shortMaskField = e3                  —— findViewById 传入的资源 ID 经 aapt2 反查为
+        //                        id/mask_view（layout_full_screen_item 里的全屏 View）。注意它的可见性
+        //                        由 U1(bool,bool) 控制，语义偏「弹窗内容遮罩」而非清屏遮罩，实战仅作兜底。
+        // 仍未定位（保持留空 = 安全跳过，不猜）：
+        //   shortMaskMethod —— 该版本全类没有「单参 bool 且操作 mask」的方法（mask 只被双参 U1 控制），
+        //                      hook 任何单参方法都是误伤，故留空；mask 同步改由周期扫描承担。
+        //   shortConfigMethod —— 整条继承链（fullscreen.i → e05.l0 → e05.a → ok4.a →
+        //                      AbsRecyclerViewHolder）上都没有 (Configuration)V 方法，属结构性移除。
+        shortStateMethod = "l2",
+        shortMaskMethod = "",
+        shortControlsMethod = "sd",
+        shortConfigMethod = "",
+        shortLayoutResetMethod = "s2",
+        shortLandscapeMethod = "",
+        shortMaskField = "e3",
+        shortNativeClearField = "",
+        shortCleanManagerField = "K3",
+        homeFragmentMaskMethod = "",
+        homeFragmentMaskField = "",
+        seriesFragmentRefreshMethod = "",
+        seriesPagerGetter = "eg",
+        seriesHolderGetter = "X0",
+        seriesLayoutFields = listOf("i", "j", "k", "l", "m", "q", "r", "w3", "x3"),
+        fixedToolbarShowMethod = "H",
+        customizeToolbarShowMethod = "F",
+        customizeToolbarApplyMethod = "G",
+        toolbarBase = "com.dragon.read.video.layer.a",
+
+        progressBar = "",
+        hideView1 = "",
+        hideView2 = "",
+
+        // OLED 亮度拦截：**该版本无法静态适配，保持留空（hook 侧会安全跳过）**。
+        // 依据：7.3.1.32 的 l83.h(有 a(List)V) / n83.a 在 7.3.7.32 已无等价物 ——
+        // 全 APK 中 OLED 相关只剩 com.dragon.read.base.framework.oled.* 四个纯枚举
+        // （OledRuntimeChangeReason / model.OledArea / model.OledScene / model.OledStrategyType），
+        // 而执行体（OledBurnInManager、OledBurnInAndroidEntry、oled.config.BrightnessConfig、
+        // OledDeviceModelConfig、oled_brightness_config、android_oled_view_target …）只以
+        // **字符串**形式出现，说明已下沉到动态模块/线上配置，APK 内没有可 hook 的类。
+        oledBright = "",
+        oledBrightAction = "",
+
+        topZoneTouch = "",
+
+        // 短剧播放器 / 播放状态回调：同时声明 onPlaybackStateChanged(TTVideoEngine,int)
+        // 与 onVideoStreamBitrateChanged(Resolution,int)，以及 setPlaySpeed(int)、
+        // getResolution()、V()Resolution[]，是旧 wj4.x / xy0.c 的对应类。
+        playbackState = "pz4.w",
+
+        adVideoEndShowMethod = "handleVideoEvent",
+
+        // 暂停广告入口：类名随发版按字母递增（7.3.1.32=j4 → 7.3.3.18=k4 → 本版=l4），
+        // 且 `b()` 的「无参、返回对象」形态跨版本保持。l4 确认是暂停广告视图助手：
+        // b() 返回 fn4.s（广告 ViewHolder）、a() 取 getAdViewHolder()、c(bool) 打 "hideAd" 日志；
+        // 并被 FullScreenViewInjectAgency 的 `pauseAdViewHelper` 懒加载构造，
+        // 同文件另有 enablePauseAd / start pauseAd / requestAd 调用链。
+        pauseAdEntryClass = "com.dragon.read.component.shortvideo.impl.inject.view.l4",
+        pauseAdEntryMethod = "b",
+
+        resolutionController = "pz4.w",
+        resolutionModelMethods = listOf("M", "O", "P"),
+        resolutionEngineField = "",
+        resolutionApplyMethod = "",
+
+        // 旧表 fullscreen.f$d / d$d 已不再实现 onDoubleTap；该版本为 fullscreen.i$d。
+        doubleTapHandlers = listOf("com.dragon.read.component.shortvideo.impl.fullscreen.i\$d"),
+        doubleTapLikeView = "",
+        doubleTapHolderLikeMethod = "",
+
+        rightViewAgency = "com.dragon.read.component.shortvideo.impl.inject.view.w6",
+        rightViewAgencyEventMethod = "s",
+        kmpAcctService = listOf("com.dragon.read.kmp.service.p0"),
+        kmpVipModel = "sr5.e",
+
+        hideIdNames = listOf(
+            "right_interact_container",
+            "ly_tools_bar_icon",
+            "series_info_panel_container",
+            "top_header_constraint_layout",
+            "bottom_container",
+            "bottom_bar_container",
+            "short_series_catalog_view",
+            "more_operation_view",
+            "enter_episode_and_full_screen_container",
+        ),
+        progressIdNames = listOf("seek_bar_root"),
+
+        // 下表 ID 取自 7.3.7.32 真机运行时按名解析结果（旧表硬编码值在本版本已整体错位
+        // +10~+58）。名称解析仍是主路径，此处仅作为视图树尚未建立时的预置兜底。
+        staticHideIds = listOf(0x7F0B26D5, 0x7F0B1F28, 0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2, 0x7F0B2A5C, 0x7F0B2030, 0x7F0B0FFA),
+        staticProgressIds = listOf(0x7F0B2943),
+
+        pauseRestoreIds = listOf(0x7F0B26D5, 0x7F0B1F28, 0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2, 0x7F0B2A5C, 0x7F0B2030, 0x7F0B0FFA),
+
+        seriesStaticIds = listOf(
+            0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2, 0x7F0B2A5C, 0x7F0B2030, 0x7F0B0FFA, 0x7F0B0FFB,
+            0x7F0B26D5, 0x7F0B1F28, 0x7F0B04B0, 0x7F0B1A52, 0x7F0B1A54, 0x7F0B0BDE, 0x7F0B2F3B, 0x7F0B2F30,
+        ),
+
+        percentPlayerCandidates = listOf("pz4.w", "pz4.f", "ov4.x", "ys4.x", "nx4.w"),
+        speedControllerCandidates = listOf(
+            "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a",
+            "ak4.d",
+            "lt4.v",
+            "bw4.v",
+        ),
+        speedControllerSetMethod = "C2",
+        speedControllerCacheMethod = "E1",
+        floatPlayerCandidates = listOf("com.dragon.read.component.shortvideo.impl.autoplay.o"),
+    )
+
     internal val CN: Names get() = CN_73132
     internal val OVERSEA: Names get() = OVERSEA_73132
 
-    fun namesFor(pkg: String, versionName: String?, classLoader: ClassLoader? = null): Names {
-        if (pkg != CN_PACKAGE) {
-            if (pkg != OVERSEA_PACKAGE) return CN_73132
+    /** 指纹检测报告：命中/未命中的「字段名=类名」明细 */
+    class ProbeReport(
+        val score: Int,
+        val total: Int,
+        val hits: List<String>,
+        val misses: List<String>,
+    ) {
+        val ratio: Float get() = if (total == 0) 0f else score.toFloat() / total
 
-            val overseaVersion = versionName?.trim()?.substringBefore(' ') ?: ""
-            val overseaByVersion = when (overseaVersion) {
+        /**
+         * 命中过半才认为该档案可信。
+         * 原实现是「命中 > 0」——只要一个类名还活着就认表，会被 R8 的
+         * 「同名不同类」骗过（7.3.7.32 的 ro4.d 就是这种：名字在，语义已变），
+         * 因此门槛提高到半数以上。
+         */
+        val confident: Boolean get() = total > 0 && score * 2 >= total
+
+        /** 便于日志输出的紧凑摘要 */
+        fun summary(): String = "$score/$total(${(ratio * 100).toInt()}%)"
+    }
+
+    /**
+     * 档案里所有「字段名 → 类名」项。
+     * 既用于跨版本指纹打分，也用于向日志输出**具体哪些字段已失效**。
+     * 只收可 Class.forName 校验的类名字段；纯混淆方法名/字段名无法校验，不参与。
+     */
+    fun probeEntries(n: Names): List<Pair<String, String>> = buildList {
+        add("shortHolder" to n.shortHolder)
+        add("holderBaseS1" to n.holderBaseS1)
+        add("toolbarBase" to n.toolbarBase)
+        add("progressBar" to n.progressBar)
+        add("hideView1" to n.hideView1)
+        add("hideView2" to n.hideView2)
+        add("oledBright" to n.oledBright)
+        add("oledBrightAction" to n.oledBrightAction)
+        add("topZoneTouch" to n.topZoneTouch)
+        add("playbackState" to n.playbackState)
+        add("pauseAdEntryClass" to n.pauseAdEntryClass)
+        add("resolutionController" to n.resolutionController)
+        add("rightViewAgency" to n.rightViewAgency)
+        add("kmpVipModel" to n.kmpVipModel)
+        n.doubleTapHandlers.forEach { add("doubleTapHandlers" to it) }
+        n.kmpAcctService.forEach { add("kmpAcctService" to it) }
+        n.percentPlayerCandidates.forEach { add("percentPlayerCandidates" to it) }
+        n.speedControllerCandidates.forEach { add("speedControllerCandidates" to it) }
+        n.floatPlayerCandidates.forEach { add("floatPlayerCandidates" to it) }
+    }.filter { it.second.isNotBlank() }
+
+    /** 逐个校验档案中的类名字段是否真实存在，返回明细报告 */
+    fun probe(n: Names, classLoader: ClassLoader?): ProbeReport {
+        val entries = probeEntries(n)
+        if (classLoader == null) {
+            return ProbeReport(0, entries.size, emptyList(), entries.map { it.first })
+        }
+        val cache = HashMap<String, Boolean>()
+        val hits = ArrayList<String>()
+        val misses = ArrayList<String>()
+        entries.forEach { (field, cls) ->
+            val ok = cache.getOrPut(cls) {
+                try {
+                    Class.forName(cls, false, classLoader)
+                    true
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            if (ok) hits += "$field=$cls" else misses += "$field=$cls"
+        }
+        return ProbeReport(hits.size, entries.size, hits, misses)
+    }
+
+    fun probeScore(n: Names, classLoader: ClassLoader?): Int = probe(n, classLoader).score
+
+    /**
+     * 取指纹可信度最高的档案。
+     * 不同档案的探针**总数不同**（新表含候选类列表，旧表没有），
+     * 因此按命中率而非绝对命中数比较，否则新表会被系统性高估。
+     */
+    fun bestByFingerprint(candidates: List<Names>, classLoader: ClassLoader?): Names {
+        if (classLoader == null) return candidates.first()
+        var best = candidates.first()
+        var bestRatio = -1f
+        var bestScore = -1
+        candidates.forEach { n ->
+            val r = probe(n, classLoader)
+            if (r.ratio > bestRatio || (r.ratio == bestRatio && r.score > bestScore)) {
+                bestRatio = r.ratio
+                bestScore = r.score
+                best = n
+            }
+        }
+        return best
+    }
+
+    /** 解析结果：档案 + 指纹报告 + 是否版本号精确命中 */
+    class Resolution(
+        val names: Names,
+        val probe: ProbeReport,
+        val exactVersion: Boolean,
+    ) {
+        /** 版本号未精确命中，或命中的表自身指纹已不达标 */
+        val degraded: Boolean get() = !exactVersion || !probe.confident
+    }
+
+    /**
+     * 解析目标档案。相比直接比对版本号的旧实现，这里增加了：
+     *  - 版本号命中后仍校验该表指纹可信度（防止「版本号对、表已被打散」的半残状态）
+     *  - 返回指纹明细，供调用方打印失效字段清单
+     */
+    fun resolve(pkg: String, versionName: String?, classLoader: ClassLoader? = null): Resolution {
+        if (pkg != CN_PACKAGE) {
+            if (pkg != OVERSEA_PACKAGE) {
+                return Resolution(CN_73132, ProbeReport(0, 0, emptyList(), emptyList()), false)
+            }
+
+            val v = versionName?.trim()?.substringBefore(' ') ?: ""
+            val exact = when (v) {
+                "7.3.7.32" -> OVERSEA_73732
                 "7.3.5.32" -> OVERSEA_73532
                 "7.3.1.32" -> OVERSEA_73132
                 else -> null
             }
-            if (overseaByVersion != null) {
-                if (classLoader == null) return overseaByVersion
-                try {
-                    Class.forName(overseaByVersion.shortHolder, false, classLoader)
-                    return overseaByVersion
-                } catch (_: Throwable) {
-
-                }
-            }
-
-            if (classLoader != null) {
-                try { Class.forName(OVERSEA_73532.shortHolder, false, classLoader); return OVERSEA_73532 } catch (_: Throwable) {}
-                try { Class.forName(OVERSEA_73132.shortHolder, false, classLoader); return OVERSEA_73132 } catch (_: Throwable) {}
-            }
-            return overseaByVersion ?: OVERSEA_73132
+            return pick(exact, listOf(OVERSEA_73732, OVERSEA_73532, OVERSEA_73132), OVERSEA_73732, classLoader)
         }
 
-        val normalized = versionName?.trim()?.substringBefore(' ') ?: ""
-        val byVersion = when (normalized) {
+        val v = versionName?.trim()?.substringBefore(' ') ?: ""
+        val exact = when (v) {
             "7.3.3.18" -> CN_73318
             "7.3.2.32" -> CN_73232
             "7.3.1.32" -> CN_73132
             else -> null
         }
-
-        if (byVersion != null) {
-            if (classLoader == null) return byVersion
-            try {
-                Class.forName(byVersion.shortHolder, false, classLoader)
-                return byVersion
-            } catch (_: Throwable) {
-
-            }
-        }
-
-        if (classLoader != null) {
-            try { Class.forName(CN_73318.shortHolder, false, classLoader); return CN_73318 } catch (_: Throwable) {}
-
-            try {
-                val oldHolder = Class.forName(CN_73232.shortHolder, false, classLoader)
-                oldHolder.getDeclaredMethod("Ea", Boolean::class.java, Boolean::class.java)
-                return CN_73232
-            } catch (_: Throwable) {}
-            try { Class.forName(CN_73132.shortHolder, false, classLoader); return CN_73132 } catch (_: Throwable) {}
-        }
-        return byVersion ?: CN_73318
+        return pick(exact, listOf(CN_73318, CN_73232, CN_73132), CN_73318, classLoader)
     }
+
+    private fun pick(
+        exact: Names?,
+        tables: List<Names>,
+        fallback: Names,
+        classLoader: ClassLoader?,
+    ): Resolution {
+        if (exact == null) {
+            if (classLoader == null) return Resolution(fallback, ProbeReport(0, 0, emptyList(), emptyList()), false)
+            val best = bestByFingerprint(tables, classLoader)
+            return Resolution(best, probe(best, classLoader), false)
+        }
+        val report = probe(exact, classLoader)
+        if (classLoader == null || report.confident) return Resolution(exact, report, true)
+
+        // 版本号对得上，但表里过半类名已失效（新版混淆重排）。
+        // 只有在另一张表**明显**更匹配时才切换，否则保留本表——版本号本身是权威信息。
+        val alt = bestByFingerprint(tables, classLoader)
+        if (alt === exact) return Resolution(exact, report, false)
+        val altReport = probe(alt, classLoader)
+        return if (altReport.ratio >= report.ratio + 0.25f) {
+            Resolution(alt, altReport, false)
+        } else {
+            Resolution(exact, report, false)
+        }
+    }
+
+    fun namesFor(pkg: String, versionName: String?, classLoader: ClassLoader? = null): Names =
+        resolve(pkg, versionName, classLoader).names
 
     fun isSupported(pkg: String, versionName: String?): Boolean {
         val v = versionName?.trim()?.substringBefore(' ') ?: return false

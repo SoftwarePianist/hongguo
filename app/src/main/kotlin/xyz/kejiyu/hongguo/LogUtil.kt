@@ -55,6 +55,9 @@ object LogUtil {
         worker.start()
     }
 
+    /** 当前日志目录（供锚点解析缓存等旁路数据落盘复用，避免污染目标 App 私有目录） */
+    fun logDir(): String = currentLogDir
+
     fun init(processName: String? = null) {
         if (initialized) return
         Thread({

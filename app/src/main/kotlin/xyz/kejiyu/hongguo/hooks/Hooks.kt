@@ -31,6 +31,7 @@ import xyz.kejiyu.hongguo.BuildConfig
 import xyz.kejiyu.hongguo.UpdateChecker
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedInterface.Hooker
+import java.io.File
 
 object Hooks {
 
@@ -292,6 +293,7 @@ object Hooks {
     private var gSettingsActivity: Activity? = null
     private val gKejiyuBtnTag = "KEJIYU_BTN_TAG"
     private val gKejiyuSettingsWrapperTag = "KEJIYU_SETTINGS_WRAPPER_TAG"
+    private const val SETTINGS_ENTRY_TITLE = "模块设置"
 
     private var gTopZoneTracking = false
     private var gTopZoneActive = false
@@ -3753,6 +3755,226 @@ object Hooks {
         }
     }
 
+    // ───────────────────────── 原生设置项 · 动态注入 ─────────────────────────
+    // 背景：宿主每次发版都会整体重排 item 类与列表方法名（7.3.7.32 里 7.3.5.32 的
+    // hz5.e / e1 / f1 全部失效）。与其继续维护映射表，不如用「同页已有的普通条目」
+    // 当模板，复制出一个同构条目——类名、方法名、字段名全部运行时推导。
+
+    private fun fieldsOfAll(instance: Any): List<java.lang.reflect.Field> {
+        val out = ArrayList<java.lang.reflect.Field>()
+        var c: Class<*>? = instance.javaClass
+        while (c != null && c != Any::class.java) {
+            c.declaredFields.forEach { runCatching { it.isAccessible = true }; out += it }
+            c = c.superclass
+        }
+        return out
+    }
+
+    private fun fieldByName(instance: Any, name: String): java.lang.reflect.Field? {
+        var c: Class<*>? = instance.javaClass
+        while (c != null) {
+            try {
+                return c.getDeclaredField(name).apply { isAccessible = true }
+            } catch (_: Throwable) {}
+            c = c.superclass
+        }
+        return null
+    }
+
+    /** 读条目标题：优先约定字段，失败则取第一个非空文本字段（含声明顺序兜底） */
+    private fun readItemTitleField(item: Any): Pair<java.lang.reflect.Field, String>? {
+        fieldByName(item, "e")?.let { f ->
+            val v = runCatching { f.get(item) }.getOrNull()
+            if (v is CharSequence && v.isNotBlank()) return f to v.toString()
+        }
+        for (f in fieldsOfAll(item)) {
+            if (f.type == CharSequence::class.java || f.type == java.lang.String::class.java) {
+                val v = runCatching { f.get(item) }.getOrNull()
+                if (v is CharSequence && v.isNotBlank()) return f to v.toString()
+            }
+        }
+        return null
+    }
+
+    /** 点击回调字段：约定字段优先，失败则取第一个「接口类型且已赋值」的字段 */
+    private fun clickCallbackField(item: Any): java.lang.reflect.Field? {
+        fieldByName(item, "n")?.let {
+            if (it.type.isInterface && runCatching { it.get(item) }.getOrNull() != null) return it
+        }
+        return fieldsOfAll(item).firstOrNull {
+            it.type.isInterface && runCatching { it.get(item) }.getOrNull() != null
+        }
+    }
+
+    /**
+     * 挑一个「可点击的普通条目」当模板：有标题、有已赋值的接口型点击回调、不是开关项，
+     * 且能就地构造（部分条目需要额外参数，如「清理缓存」要传 adapter，不能拿来复制）。
+     * 注意「是否开关项」的判据必须是字段值而非字段类型——开关字段声明在基类上，
+     * 每个条目都有这个字段，只有开关项才有值；按类型筛会把所有条目都排除掉。
+     */
+    private fun pickSettingsTemplateItem(list: List<Any?>, act: Activity?): Any? {
+        for (item in list) {
+            if (item == null) continue
+            if (readItemTitleField(item) == null) continue
+            val switchState = fieldByName(item, "o")?.let { runCatching { it.get(item) }.getOrNull() }
+            if (switchState is java.util.concurrent.atomic.AtomicBoolean) continue
+            if (clickCallbackField(item) == null) continue
+            if (!canConstructLike(item, act)) continue
+            return item
+        }
+        return null
+    }
+
+    private fun canConstructLike(template: Any, act: Activity?): Boolean {
+        val appCtx = act?.applicationContext
+        for (ctor in template.javaClass.declaredConstructors) {
+            when (ctor.parameterCount) {
+                0 -> return true
+                1 -> {
+                    val p0 = ctor.parameterTypes[0]
+                    if ((act != null && p0.isInstance(act)) || (appCtx != null && p0.isInstance(appCtx))) return true
+                }
+            }
+        }
+        return false
+    }
+
+    /** 用模板的类构造同构实例；优先单参构造（Context / AbsActivity 等） */
+    private fun newItemLikeTemplate(template: Any, act: Activity?): Any? {
+        val appCtx = act?.applicationContext
+        for (ctor in template.javaClass.declaredConstructors.sortedBy { it.parameterCount }) {
+            try {
+                ctor.isAccessible = true
+                val types = ctor.parameterTypes
+                when {
+                    types.isEmpty() -> return ctor.newInstance()
+                    types.size == 1 -> {
+                        if (act != null && types[0].isInstance(act)) return ctor.newInstance(act)
+                        if (appCtx != null && types[0].isInstance(appCtx)) return ctor.newInstance(appCtx)
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+        return null
+    }
+
+    /** 用动态代理接管条目的点击回调（宿主用的是接口，不需要 hook 任何类） */
+    private fun installClickProxy(item: Any, cbField: java.lang.reflect.Field, act: Activity?) {
+        val iface = cbField.type
+        if (!iface.isInterface) return
+        val handler = java.lang.reflect.InvocationHandler { _, method, _ ->
+            when (method.name) {
+                "equals" -> false
+                "hashCode" -> System.identityHashCode(item)
+                "toString" -> "KejiyuSettingsClick"
+                else -> {
+                    mainHandler.post {
+                        try { showPanel(gSettingsActivity ?: act ?: gCurrentActivity) } catch (_: Throwable) {}
+                    }
+                    null
+                }
+            }
+        }
+        val proxy = java.lang.reflect.Proxy.newProxyInstance(
+            iface.classLoader ?: item.javaClass.classLoader,
+            arrayOf(iface),
+            handler,
+        )
+        cbField.set(item, proxy)
+    }
+
+    /**
+     * 让条目按「独立分组卡片」形态渲染（上下都圆角）。
+     *
+     * 7.3.7.32 起，条目圆角不再由条目自身的样式字段决定，而是由**分组基类**
+     * （item 的 abstract 父类，实测 `p26.a$a`）上的三个 boolean 驱动：
+     *   a = 属于分组卡片（决定是否走卡片分支）
+     *   b = 组内首项（上圆角背景可见）
+     *   c = 组内末项（下圆角背景可见）
+     * 由分组管理器（实测 `p26.a`）的 `c()` 按「首项 b=true / 末项 c=true / 其余 a=true」
+     * 统一赋值，数据构建结束时调用一次。
+     *
+     * 我们的条目是 hook 列表方法返回之后才塞进去的，既没进任何分组，也没同步这三个
+     * 字段，onBind 于是走 else 分支把上下圆角背景全部 GONE —— 用户看到的就是「直角」。
+     * 这里按「独立卡片」直接置位 a=b=c=true：因为不进分组，宿主之后再怎么重算
+     * 分组状态（如 onResume 里的 n1()）都不会覆盖它，比挂进别人分组更稳。
+     */
+    private fun applyGroupCardStyle(item: Any, list: List<Any?>): String {
+        val isBool = { f: java.lang.reflect.Field -> f.type == java.lang.Boolean.TYPE }
+        val byName = listOf("a", "b", "c").map { fieldByName(item, it)?.takeIf(isBool) }
+        if (byName.all { it != null }) {
+            byName.forEach { it!!.set(item, true) }
+            fieldByName(item, "d")?.takeIf { it.type == CharSequence::class.java }?.set(item, "")
+            return "字段名 a/b/c"
+        }
+
+        // 兜底：字段名漂移时，按「item 的 abstract 父类声明顺序」取前三个 boolean。
+        // 前提是列表里已存在 a=true 的条目 —— 那才证明确实是这套分组卡片机制，
+        // 否则（例如国内版旧结构）宁可不设，避免把无关字段改成 true。
+        var base: Class<*>? = item.javaClass
+        while (base != null && base != Any::class.java && !java.lang.reflect.Modifier.isAbstract(base.modifiers)) {
+            base = base.superclass
+        }
+        val groupBase = base?.takeIf { it != Any::class.java } ?: return "跳过(未找到分组基类)"
+        val bools = groupBase.declaredFields.filter(isBool)
+        if (bools.size < 3) return "跳过(分组基类 boolean 不足:${bools.size})"
+        val positionFields = bools.take(3)
+        val inUse = list.any { other ->
+            other != null && positionFields.any { f ->
+                fieldByName(other, f.name)?.takeIf(isBool)?.let { runCatching { it.get(other) }.getOrNull() } == true
+            }
+        }
+        if (!inUse) return "跳过(宿主未使用分组卡片)"
+        positionFields.forEach { runCatching { it.isAccessible = true; it.set(item, true) } }
+        groupBase.declaredFields.firstOrNull { it.type == CharSequence::class.java }
+            ?.let { runCatching { it.isAccessible = true; it.set(item, "") } }
+        return "声明顺序兜底 ${positionFields.map { it.name }}"
+    }
+
+    internal fun injectNativeSettingsItemDynamic(listObj: Any?, act: Activity?, classLoader: ClassLoader): Boolean {
+        val list = listObj as? MutableList<Any?> ?: return false
+        try {
+            for (item in list) {
+                if (item != null && readItemTitleField(item)?.second == SETTINGS_ENTRY_TITLE) return true
+            }
+
+            val template = pickSettingsTemplateItem(list, act) ?: run {
+                LogUtil.warn("原生设置动态注入跳过：未找到可用模板条目")
+                return false
+            }
+            val (titleField, templateTitle) = readItemTitleField(template) ?: return false
+            val item = newItemLikeTemplate(template, act) ?: run {
+                LogUtil.warn("原生设置动态注入跳过：无法构造 ${template.javaClass.name}")
+                return false
+            }
+
+            val newTitleField = fieldByName(item, titleField.name) ?: run {
+                LogUtil.warn("原生设置动态注入跳过：新实例缺少标题字段 ${titleField.name}")
+                return false
+            }
+            newTitleField.set(item, SETTINGS_ENTRY_TITLE)
+
+            fieldByName(item, "f")?.takeIf { it.type == CharSequence::class.java }
+                ?.set(item, "点击打开模块菜单")
+            fieldByName(item, "i")?.takeIf { it.type == java.lang.Boolean.TYPE }
+                ?.set(item, true)
+            val cardStyle = applyGroupCardStyle(item, list)
+            clickCallbackField(item)?.let { installClickProxy(item, it, act) }
+
+            // 固定插到列表最顶部（与旧版一致），而不是挨着模板条目 —— 挨着模板会跟着
+            // 模板所在分组跑，位置随宿主条目的增删飘移。
+            list.add(0, item)
+            LogUtil.info(
+                "原生设置项已动态注入: 模板=${template.javaClass.name}「$templateTitle」 index=0" +
+                    " | 标题字段=${titleField.name} | 卡片样式=$cardStyle | profile=${gNames.profileId}",
+            )
+            return true
+        } catch (e: Throwable) {
+            LogUtil.warn("原生设置项动态注入失败: ${e.javaClass.simpleName}: ${e.message}")
+            return false
+        }
+    }
+
     private fun boundSettingsTitle(clickHost: Any): String? {
         return try {
             val holder = findFieldValue(clickHost, "a") ?: return null
@@ -3774,9 +3996,50 @@ object Hooks {
         return fallback
     }
 
+    /** 感知亮度（0..255），用于推导对比色 */
+    private fun perceivedLuminance(color: Int): Int =
+        (Color.red(color) * 299 + Color.green(color) * 587 + Color.blue(color) * 114) / 1000
+
+    /**
+     * 保证文字在给定背景上可读：优先沿用宿主文字色，明暗对比不足时按背景明暗切换。
+     * 历史事故：兜底入口背景透明、文字色取自隔壁设置项（浅色），恰好落在 App 自带的
+     * 白色区域上 → 白底白字，用户只看到一个白色色块。
+     */
+    private fun readableTextOn(bg: Int, preferred: Int): Int {
+        if (Color.alpha(bg) < 40) return preferred
+        val lb = perceivedLuminance(bg)
+        val lp = perceivedLuminance(preferred)
+        if (Math.abs(lb - lp) >= 80) return preferred
+        return if (lb > 150) safeRgb(28, 25, 23) else safeRgb(245, 243, 240)
+    }
+
+    /** 取 Drawable 的纯色；渐变/ripple 等返回 null */
+    private fun solidColorOf(drawable: android.graphics.drawable.Drawable?): Int? = when (drawable) {
+        is android.graphics.drawable.ColorDrawable -> drawable.color
+        is android.graphics.drawable.GradientDrawable ->
+            runCatching { drawable.color?.defaultColor }.getOrNull()
+        else -> null
+    }
+
+    /** 在视图树里找第一个不透明纯色背景（宿主页面/卡片底色），跳过模块自己注入的 view */
+    private fun resolveHostSurfaceColor(root: View?, depth: Int = 0): Int? {
+        if (root == null || depth > 8) return null
+        if (root.tag == gKejiyuBtnTag || root.tag == gKejiyuSettingsWrapperTag) return null
+        solidColorOf(root.background)?.let { if (Color.alpha(it) == 255) return it }
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                resolveHostSurfaceColor(root.getChildAt(i), depth + 1)?.let { return it }
+            }
+        }
+        return null
+    }
+
     private fun makeNativeSettingsEntry(act: Activity, parent: ViewGroup): View {
         val p = panelPalette(act)
-        val textColor = nearestSettingsTextColor(parent, p.text)
+        val hostText = nearestSettingsTextColor(parent, p.text)
+        // 不透明背景 + 按背景算出的对比色：不再依赖「父容器是什么颜色」这个不可控前提。
+        val bgColor = p.surface
+        val textColor = readableTextOn(bgColor, hostText)
         return LinearLayout(act).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -3786,19 +4049,24 @@ object Hooks {
             markAsModuleUi(this)
             isClickable = true
             isFocusable = true
-            // 背景显式透明 + 自有 ripple：不依赖目标 App 主题，避免深色模式下底色发白
             try {
-                val rippleColor = safeArgb(30, Color.red(p.textSecondary), Color.green(p.textSecondary), Color.blue(p.textSecondary))
+                val rippleColor = safeArgb(38, Color.red(textColor), Color.green(textColor), Color.blue(textColor))
+                // 圆角跟着宿主卡片走：兜底入口是自绘 View，不圆角会显得比原生条目「硬」
+                val content = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    setColor(bgColor)
+                    cornerRadius = dp(act, 12f).toFloat()
+                }
                 background = android.graphics.drawable.RippleDrawable(
                     ColorStateList.valueOf(rippleColor),
-                    android.graphics.drawable.ColorDrawable(Color.TRANSPARENT),
+                    content,
                     android.graphics.drawable.ColorDrawable(Color.WHITE),
                 )
             } catch (_: Throwable) {
-                background = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+                background = android.graphics.drawable.ColorDrawable(bgColor)
             }
             addView(TextView(act).apply {
-                text = "模块设置"
+                text = SETTINGS_ENTRY_TITLE
                 textSize = 15f
                 setTextColor(textColor)
                 includeFontPadding = false
@@ -3807,7 +4075,7 @@ object Hooks {
             addView(TextView(act).apply {
                 text = "›"
                 textSize = 25f
-                setTextColor(p.textSecondary)
+                setTextColor(readableTextOn(bgColor, p.textSecondary))
                 includeFontPadding = false
                 gravity = Gravity.CENTER
             }, LinearLayout.LayoutParams(dp(act, 30f), ViewGroup.LayoutParams.MATCH_PARENT))
@@ -3866,6 +4134,8 @@ object Hooks {
                 )
                 stage.addView(child, lp)
             }
+            // 铺上宿主底色：App 底部常自带白底区域，不铺会让兜底入口「悬」在一片白块上
+            wrapper.setBackgroundColor(resolveHostSurfaceColor(stage) ?: panelPalette(act).page)
 
             val entry = makeNativeSettingsEntry(act, wrapper)
 
@@ -3947,24 +4217,174 @@ object Hooks {
         mainHandler.post { UpdateChecker.showUpdateDialogIfNeeded(a) }
     }
 
-    private fun detectTargetPackageVersion(pkg: String): Pair<String?, Long> {
+    /**
+     * 收集可用的 Context 候选。
+     *
+     * 关键点：hook 是在 onPackageReady 阶段安装的，此时目标进程的 Application
+     * 还没有创建，`ActivityThread.currentApplication()` 会返回 null —— 这正是
+     * 之前 detectedVersion 一直是「未知」的原因。system context 在该阶段已经可用，
+     * 因此优先用它拿 PackageManager。
+     */
+    private fun contextCandidates(): List<Context> {
+        val out = mutableListOf<Context>()
         try {
-            val app = try {
-                Class.forName("android.app.ActivityThread").getDeclaredMethod("currentApplication").invoke(null) as? Context
-            } catch (_: Throwable) {
-                try { Class.forName("android.app.AppGlobals").getDeclaredMethod("getInitialApplication").invoke(null) as? Context } catch (_: Throwable) { null }
+            val at = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentActivityThread").invoke(null)
+            if (at != null) {
+                val sysCtx = at.javaClass.getMethod("getSystemContext").invoke(at) as? Context
+                if (sysCtx != null) out.add(sysCtx)
             }
-            if (app != null) {
-                @Suppress("DEPRECATION")
-                val pi = app.packageManager.getPackageInfo(pkg, 0)
-                @Suppress("DEPRECATION")
-            val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else pi.versionCode.toLong()
-                return pi.versionName to code
-            }
-        } catch (e: Throwable) {
-            LogUtil.warn("读取目标版本失败，改用类指纹: $e")
+        } catch (_: Throwable) {
         }
+        try {
+            (Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication").invoke(null) as? Context)?.let { out.add(it) }
+        } catch (_: Throwable) {
+        }
+        try {
+            (Class.forName("android.app.AppGlobals")
+                .getDeclaredMethod("getInitialApplication").invoke(null) as? Context)?.let { out.add(it) }
+        } catch (_: Throwable) {
+        }
+        return out
+    }
+
+    private fun detectTargetPackageVersion(pkg: String): Pair<String?, Long> {
+        contextCandidates().forEach { ctx ->
+            try {
+                @Suppress("DEPRECATION")
+                val pi = ctx.packageManager.getPackageInfo(pkg, 0)
+                if (pi != null) {
+                    @Suppress("DEPRECATION")
+                    val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else pi.versionCode.toLong()
+                    if (!pi.versionName.isNullOrBlank() || code > 0L) return pi.versionName to code
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        LogUtil.warn("读取目标包版本失败（将回退到类指纹识别）")
         return null to -1L
+    }
+
+    /**
+     * 用「方法名锚点」修正映射表中已失效的混淆类名。
+     *
+     * 只在该字段**为空或类已加载不出来**时才覆盖——已适配版本零改动、零开销；
+     * 目标 App 发版导致类名整体重排时，锚点自动补位，避免整条功能链静默失效。
+     * 锚点解析结果按 profile 缓存到日志目录，同一版本只在首次运行付出扫描成本。
+     */
+    private fun applyAnchorOverrides(
+        names: TargetNames.Names,
+        classLoader: ClassLoader?,
+        pkg: String,
+        versionLabel: String?,
+    ): TargetNames.Names {
+        if (classLoader == null) return names
+        val apkPaths = AnchorResolver.apkPaths(contextCandidates(), pkg)
+        if (apkPaths.isEmpty()) return names
+
+        val safeVersion = (versionLabel ?: "未知").replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val resolution = try {
+            AnchorResolver.resolve(
+                apkPaths = apkPaths,
+                classLoader = classLoader,
+                cacheFile = File(LogUtil.logDir(), "anchors-$safeVersion.txt"),
+            )
+        } catch (e: Throwable) {
+            LogUtil.warn("锚点解析异常，沿用表内类名: ${e.javaClass.simpleName}: ${e.message}")
+            return names
+        }
+
+        if (resolution.byId.isEmpty()) {
+            LogUtil.info("锚点解析：无命中（来源=${resolution.source} 耗时=${resolution.costMs}ms）")
+            return names
+        }
+
+        val applied = ArrayList<String>()
+
+        fun pick(fieldName: String, current: String, anchorId: String): String {
+            val candidate = resolution.first(anchorId) ?: return current
+            if (current.isNotBlank() && classExists(current, classLoader)) return current
+            applied += "$fieldName=${current.ifBlank { "<空>" }}→$candidate"
+            return candidate
+        }
+
+        fun merge(fieldName: String, current: List<String>, anchorId: String): List<String> {
+            val extra = resolution.all(anchorId)
+            if (extra.isEmpty()) return current
+            val alive = current.filter { classExists(it, classLoader) }
+            if (current.isNotEmpty() && alive.size == current.size) return current
+            applied += "$fieldName 候选 ${current.size}→${(alive + extra).distinct().size}"
+            return (alive + extra).distinct()
+        }
+
+        var out = names.copy(
+            shortHolder = pick("shortHolder", names.shortHolder, "holder"),
+            holderBaseS1 = pick("holderBaseS1", names.holderBaseS1, "holder"),
+            playbackState = pick("playbackState", names.playbackState, "player"),
+            resolutionController = pick("resolutionController", names.resolutionController, "player"),
+        )
+
+        val doubleTapHost = resolution.first("doubleTap")
+        if (doubleTapHost != null && names.doubleTapHandlers.none { classExists(it, classLoader) }) {
+            applied += "doubleTapHandlers=${names.doubleTapHandlers.ifEmpty { listOf("<空>") }.joinToString(",")}→$doubleTapHost"
+            out = out.copy(doubleTapHandlers = listOf(doubleTapHost))
+        }
+
+        out = out.copy(
+            percentPlayerCandidates = merge("percentPlayerCandidates", names.percentPlayerCandidates, "percentPlayer"),
+            speedControllerCandidates = merge("speedControllerCandidates", names.speedControllerCandidates, "speedController"),
+            floatPlayerCandidates = merge("floatPlayerCandidates", names.floatPlayerCandidates, "floatPlayer"),
+        )
+
+        LogUtil.info(
+            "锚点解析：来源=${resolution.source} 耗时=${resolution.costMs}ms | 命中=" +
+                resolution.byId.entries.joinToString(", ") { "${it.key}=${it.value.first()}" } +
+                " | 生效覆盖=" + if (applied.isEmpty()) "无（表内类名均有效）" else applied.joinToString(" ; "),
+        )
+        if (resolution.truncated) {
+            LogUtil.warn("锚点扫描超出时间预算被截断，结果可能不完整")
+        }
+        return out
+    }
+
+    private fun classExists(cls: String, classLoader: ClassLoader?): Boolean {
+        if (cls.isBlank()) return false
+        return try {
+            Class.forName(cls, false, classLoader)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 依次尝试候选类名，返回第一个「存在且声明了指定方法」的类。
+     *
+     * 动机：混淆类名（ov4.x / ys4.x / pz4.w …）每次发版都可能变，
+     * 但被 keep 规则保留的方法名（setPlaySpeed、getCurrentPlaySpeed、
+     * setSpeed、onDoubleTap …）跨版本稳定得多。用「类名候选 + 方法签名校验」
+     * 定位目标类，比硬编码单一类名鲁棒。
+     */
+    private fun resolveClassWithMethod(
+        candidates: List<String>,
+        method: String,
+        paramTypes: Array<Class<*>>,
+        classLoader: ClassLoader?,
+    ): Class<*>? {
+        for (name in candidates.filter { it.isNotBlank() }.distinct()) {
+            try {
+                val c = Class.forName(name, false, classLoader)
+                val ok = if (paramTypes.isEmpty()) {
+                    c.declaredMethods.any { it.name == method }
+                } else {
+                    runCatching { c.getDeclaredMethod(method, *paramTypes) }.isSuccess
+                }
+                if (ok) return c
+            } catch (_: Throwable) {
+            }
+        }
+        return null
     }
 
     fun installBusinessHooks(module: MainHook, classLoader: ClassLoader, pkg: String) {
@@ -3992,7 +4412,14 @@ object Hooks {
         gTargetVersionName = detected.first ?: "未知"
         gTargetVersionCode = detected.second
 
-        gNames = TargetNames.namesFor(pkg, detected.first, classLoader)
+        val resolution = TargetNames.resolve(pkg, detected.first, classLoader)
+        // 仅当表内存在加载不出来的类名字段时才启动锚点解析：全绿时零额外开销
+        val needAnchors = TargetNames.probe(resolution.names, classLoader).misses.isNotEmpty()
+        gNames = if (needAnchors) {
+            applyAnchorOverrides(resolution.names, classLoader, pkg, detected.first)
+        } else {
+            resolution.names
+        }
 
         if (gNames.useLegacySeedIds) seedIds.forEach { gTargetIdSet.add(it) }
         gNames.staticHideIds.forEach { gTargetIdSet.add(it) }
@@ -4003,7 +4430,19 @@ object Hooks {
             gSeriesTargetIdSet.add(it)
             gPauseRestoreIdSet.add(it)
         }
-        LogUtil.info("目标兼容配置=${gNames.profileId} | detectedVersion=${gTargetVersionName}(${gTargetVersionCode}) | shortHolder=${gNames.shortHolder} | holderBaseS1=${gNames.holderBaseS1} | toolbarBase=${gNames.toolbarBase} | kmpVipModel=${gNames.kmpVipModel}")
+        val versionExact = TargetNames.isSupported(pkg, detected.first) && resolution.exactVersion
+        val report = TargetNames.probe(gNames, classLoader)
+        LogUtil.info("目标兼容配置=${gNames.profileId} | detectedVersion=${gTargetVersionName}(${gTargetVersionCode}) | 版本精确匹配=${if (versionExact) "是" else "否(指纹推断)"} | 指纹命中=${report.summary()} | shortHolder=${gNames.shortHolder} | holderBaseS1=${gNames.holderBaseS1} | toolbarBase=${gNames.toolbarBase} | playbackState=${gNames.playbackState} | kmpVipModel=${gNames.kmpVipModel}")
+        if (report.misses.isNotEmpty()) {
+            LogUtil.info("指纹失效字段 ${report.misses.size} 项: ${report.misses.joinToString(" | ")}")
+        }
+        if (!versionExact) {
+            LogUtil.warn("⚠ 未适配版本 | pkg=$pkg | version=$gTargetVersionName($gTargetVersionCode) | 已降级使用 ${gNames.profileId} | 指纹命中=${report.summary()}")
+            if (report.misses.isNotEmpty()) {
+                LogUtil.warn("⚠ 失效字段 ${report.misses.size} 项: ${report.misses.joinToString(" | ")}")
+            }
+            LogUtil.warn("⚠ 该版本不在适配表内，部分功能可能静默失效；请补充映射或回滚到已适配版本")
+        }
         LogUtil.info("资源兼容：hideIds=${gTargetIdSet.joinToString { "0x%08X".format(it) }} | seriesIds=${gSeriesTargetIdSet.joinToString { "0x%08X".format(it) }} | progressIds=${gProgressIdSet.joinToString { "0x%08X".format(it) }} | pauseIds=${gPauseRestoreIdSet.joinToString { "0x%08X".format(it) }}")
 
         mainHandler.postDelayed({
@@ -4328,11 +4767,22 @@ object Hooks {
             }
         }
 
-        if (gNames.resolutionController.isNotBlank()) {
+        if (gNames.resolutionController.isNotBlank() || gNames.resolutionApplyMethod.isBlank()) {
             try {
-                val controllerClass = Class.forName(gNames.resolutionController, false, classLoader)
+                // 控制器混淆类名可能已随版本失效。这里必须容错：若直接抛异常，
+                // 整个画质分支（含下方 TTVideoEngine 引擎侧 hook）都会被一起跳过，
+                // 表现为「自动最高画质完全失效」。占位类不会有同名方法，
+                // ham() 过滤后自然不会安装任何 hook。
+                val controllerClass = try {
+                    Class.forName(gNames.resolutionController, false, classLoader)
+                } catch (_: Throwable) {
+                    LogUtil.warn("  画质控制器 ${gNames.resolutionController} 不存在，仅安装引擎侧 hook")
+                    Any::class.java
+                }
                 val engineField = if (gNames.resolutionEngineField.isNotBlank()) {
-                    controllerClass.getDeclaredField(gNames.resolutionEngineField).apply { isAccessible = true }
+                    runCatching {
+                        controllerClass.getDeclaredField(gNames.resolutionEngineField).apply { isAccessible = true }
+                    }.getOrNull()
                 } else null
                 for ((methodIndex, methodName) in gNames.resolutionModelMethods.withIndex()) {
                     ham(controllerClass, methodName, "maxQualityModel_${methodIndex}") { chain ->
@@ -4598,24 +5048,46 @@ object Hooks {
             val isNewCn = gNames.profileId == "CN-7.3.3.18"
             val isOversea = gNames.profileId == "OVERSEA-7.3.1.32"
 
-            val percentPlayerClassName = when {
+            // 旧版本单一路径，保留为兜底
+            val legacyPlayer = when {
                 isNewCn -> "nx4.w"
                 isOversea -> "ys4.x"
                 else -> "ov4.x"
             }
-            val controllerClassName = when {
+            val legacyControllerClass = when {
                 isNewCn -> "com.dragon.read.component.shortvideo.impl.v2.view.adapter.a"
                 isOversea -> "lt4.v"
                 else -> "bw4.v"
             }
-            val controllerSetMethod = when {
+            val legacySetMethod = when {
                 isNewCn -> "v2"
                 isOversea -> "u2"
                 else -> "r2"
             }
-            val controllerCacheMethod = if (isNewCn) "w" else "getCacheVideoSpeed"
+            val legacyCacheMethod = if (isNewCn) "w" else "getCacheVideoSpeed"
 
-            val playerClass = Class.forName(percentPlayerClassName, false, classLoader)
+            // 候选 + 运行时签名校验：判定依据是「类里确实声明了 setPlaySpeed(int)」，
+            // 而不是类名本身。旧逻辑直接 Class.forName("ov4.x") 后取方法，一旦
+            // 类名被复用给别的类就会抛 NoSuchMethodException，整段倍速功能全丢。
+            val playerClass = resolveClassWithMethod(
+                gNames.percentPlayerCandidates + legacyPlayer,
+                "setPlaySpeed",
+                arrayOf(Integer.TYPE),
+                classLoader,
+            ) ?: throw NoSuchMethodException(
+                "未找到声明 setPlaySpeed(int) 的播放器类，候选=${gNames.percentPlayerCandidates + legacyPlayer}"
+            )
+            val percentPlayerClassName = playerClass.name
+
+            val controllerSetMethod = gNames.speedControllerSetMethod.ifBlank { legacySetMethod }
+            val controllerCacheMethod = gNames.speedControllerCacheMethod.ifBlank { legacyCacheMethod }
+            val controllerClassName = resolveClassWithMethod(
+                gNames.speedControllerCandidates + legacyControllerClass,
+                "getCurrentPlaySpeed",
+                emptyArray(),
+                classLoader,
+            )?.name ?: legacyControllerClass
+
             hac(playerClass, "defaultSpeedPlayerCtor") { chain ->
                 val result = chain.proceed()
                 try {
@@ -4642,36 +5114,66 @@ object Hooks {
                     chain.proceed(args)
                 })
 
-            val controllerClass = Class.forName(controllerClassName, false, classLoader)
-            val controllerSetter = controllerClass.getDeclaredMethod(
-                controllerSetMethod,
-                Boolean::class.javaPrimitiveType,
-                java.lang.Float.TYPE,
-                Boolean::class.javaPrimitiveType,
-            )
-            module.hook(controllerSetter).setId("defaultSpeedControllerSet")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    if (!defaultSpeedEnabledNow()) return@Hooker chain.proceed()
-                    val args = (chain.args as Array<Any?>).copyOf()
-                    args[1] = gDefaultSpeed
-                    LogUtil.incr("defaultSpeedControllerForce")
-                    chain.proceed(args)
-                })
-            val cacheGetter = controllerClass.getDeclaredMethod(controllerCacheMethod, String::class.java)
-            module.hook(cacheGetter).setId("defaultSpeedCacheGetter")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    if (defaultSpeedEnabledNow()) gDefaultSpeed else chain.proceed()
-                })
-            val currentGetter = controllerClass.getDeclaredMethod("getCurrentPlaySpeed")
-            module.hook(currentGetter).setId("defaultSpeedCurrentGetter")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    if (defaultSpeedEnabledNow()) defaultSpeedPercent() else chain.proceed()
-                })
+            // 控制器侧整体容错：失败不能影响已安装的播放器侧 hook，
+            // 也不能影响其后的 autoplay(setSpeed/float) 侧 hook。
+            try {
+                val controllerClass = Class.forName(controllerClassName, false, classLoader)
+                // 先按档案里的方法名找；找不到再按签名 (boolean, float, boolean) 兜底，
+                // 这样混淆方法名变化时依然能命中。
+                val controllerSetter = runCatching {
+                    controllerClass.getDeclaredMethod(
+                        controllerSetMethod,
+                        Boolean::class.javaPrimitiveType,
+                        java.lang.Float.TYPE,
+                        Boolean::class.javaPrimitiveType,
+                    )
+                }.getOrNull() ?: controllerClass.declaredMethods.firstOrNull { m ->
+                    m.parameterTypes.size == 3 &&
+                        m.parameterTypes[0] == Boolean::class.javaPrimitiveType &&
+                        m.parameterTypes[1] == java.lang.Float.TYPE &&
+                        m.parameterTypes[2] == Boolean::class.javaPrimitiveType
+                } ?: throw NoSuchMethodException(
+                    "倍速控制器 setter 未找到: $controllerClassName | name=$controllerSetMethod | sig=(boolean,float,boolean)"
+                )
+                module.hook(controllerSetter).setId("defaultSpeedControllerSet")
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(Hooker { chain ->
+                        if (!defaultSpeedEnabledNow()) return@Hooker chain.proceed()
+                        val args = (chain.args as Array<Any?>).copyOf()
+                        args[1] = gDefaultSpeed
+                        LogUtil.incr("defaultSpeedControllerForce")
+                        chain.proceed(args)
+                    })
+                runCatching { controllerClass.getDeclaredMethod(controllerCacheMethod, String::class.java) }
+                    .getOrNull()?.let { cacheGetter ->
+                        module.hook(cacheGetter).setId("defaultSpeedCacheGetter")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                if (defaultSpeedEnabledNow()) gDefaultSpeed else chain.proceed()
+                            })
+                    }
+                runCatching { controllerClass.getDeclaredMethod("getCurrentPlaySpeed") }
+                    .getOrNull()?.let { currentGetter ->
+                        module.hook(currentGetter).setId("defaultSpeedCurrentGetter")
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .intercept(Hooker { chain ->
+                                if (defaultSpeedEnabledNow()) defaultSpeedPercent() else chain.proceed()
+                            })
+                    }
+                LogUtil.info("  ✓ 倍速控制器 $controllerClassName.$controllerSetMethod/$controllerCacheMethod")
+            } catch (e: Throwable) {
+                LogUtil.warn("  倍速控制器侧 Hook 失败（播放器侧已生效）: $e")
+            }
 
-            val autoplayClass = Class.forName("com.dragon.read.component.shortvideo.impl.autoplay.o", false, classLoader)
+            // autoplay(float) 侧：同样改为候选 + 签名校验(setSpeed(float))
+            val autoplayClass = resolveClassWithMethod(
+                gNames.floatPlayerCandidates + "com.dragon.read.component.shortvideo.impl.autoplay.o",
+                "setSpeed",
+                arrayOf(java.lang.Float.TYPE),
+                classLoader,
+            ) ?: throw NoSuchMethodException(
+                "未找到声明 setSpeed(float) 的 autoplay 播放器类，候选=${gNames.floatPlayerCandidates}"
+            )
             hac(autoplayClass, "defaultSpeedAutoplayCtor") { chain ->
                 val result = chain.proceed()
                 try {
@@ -5262,20 +5764,29 @@ object Hooks {
         ).withIndex()) {
             try {
                 val settingsClass = Class.forName(settingsClassName, false, classLoader)
-                settingsClass.declaredMethods
-                    .filter { it.name in settingsSpec.listMethods && java.util.List::class.java.isAssignableFrom(it.returnType) }
-                    .forEachIndexed { methodIndex, method ->
-                        module.hook(method)
-                            .setId("nativeSettingsList_${classIndex}_$methodIndex")
-                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                            .intercept(Hooker { chain ->
-                                val result = chain.proceed()
-                                injectNativeSettingsList(result, classLoader, settingsSpec)
-                                result
-                            })
-                        nativeSettingsListHookCount++
-                        LogUtil.info("  ✓ native settings list $settingsClassName.${method.name} -> ${settingsSpec.itemClass}")
-                    }
+                // 列表方法名每次发版都会重排（7.3.7.32 实测：n1/o1 → k1/l1，且 item 类整体换代）。
+                // 因此优先按表内名字命中，命中不到就退化为「带参且返回 List 的方法」——
+                // 设置页必然有且仅有一两个这样的方法。
+                val listMethods = settingsClass.declaredMethods
+                    .filter { java.util.List::class.java.isAssignableFrom(it.returnType) && it.parameterCount in 1..2 }
+                    .sortedByDescending { it.name in settingsSpec.listMethods }
+                if (listMethods.isEmpty()) continue
+                val named = listMethods.any { it.name in settingsSpec.listMethods }
+                listMethods.forEachIndexed { methodIndex, method ->
+                    module.hook(method)
+                        .setId("nativeSettingsList_${classIndex}_$methodIndex")
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(Hooker { chain ->
+                            val result = chain.proceed()
+                            val act = chain.thisObject as? Activity
+                            if (!injectNativeSettingsList(result, classLoader, settingsSpec)) {
+                                injectNativeSettingsItemDynamic(result, act, classLoader)
+                            }
+                            result
+                        })
+                    nativeSettingsListHookCount++
+                    LogUtil.info("  ✓ native settings list $settingsClassName.${method.name}(${if (named) "表内命中" else "运行时探测"})")
+                }
             } catch (_: Throwable) {}
         }
 
