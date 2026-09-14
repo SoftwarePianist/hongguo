@@ -82,6 +82,48 @@ object Hooks {
         java.util.WeakHashMap<Any, Any>()
     )
 
+    /**
+     * 宿主「原生切清晰度入口」是否已被证明可用（[applyHighestViaController] 成功过一次即为真）。
+     *
+     * 它是**进程级常量**：入口能不能解析出来只取决于 R8 给它起的名字对不对，运行期不会变，故不复位。
+     *
+     * 用途：一切「绕过宿主、直捅引擎 `configResolution`」的兜底都必须以它为前置条件。原生入口
+     * 一次就完成「写宿主状态字段 + 下发引擎」；既然后者可用，旁路写引擎就只剩坏处 ——
+     * 制造第二个所有者（「引擎播 1080p、按钮显示 720P」的状态分叉），并可能把用户手选的档位拉回最高。
+     */
+    @Volatile private var gNativeResolutionEntryUsable = false
+
+    /**
+     * 清晰度应用的**重入深度**（线程内）。
+     *
+     * jadx 证实 7.3.7.32 `pz4.w` 的 `P(VideoModel,long,String,SaasVideoData)` 与
+     * `O(VideoModel,long,String,gl4.s,boolean,SaasVideoData)` 体内都会再调 `M(VideoModel)`，
+     * 而这三个入口都被本模块 hook —— 于是宿主「配置一次播放」会让我们的 block 依次命中 2~3 次
+     * （日志实测同一档位成对出现），重复走「写宿主状态 + 下发引擎」。只让最外层那一次干活。
+     */
+    private val gResolutionApplyDepth = java.lang.ThreadLocal<Int>()
+
+    /**
+     * 已经为每个 **VideoModel 实例**应用到的档位（rank，见 [resolutionRank]）。
+     *
+     * 为什么需要：宿主的**无缝切档**流程会把本次配置推迟到渲染开始再走一遍
+     * （`pz4.w.M()` 里 `f367722s = true; f367721r = resolutionA; return`，随后 `onRenderStart` 消费），
+     * 于是**同一集**内会出现第二次 model 方法调用 —— 我们的 hook 会把它当成「新的播放」再应用一次。
+     * 2026-09-14 实测（7.3.7.32）：
+     *     21:39:41.963 实际播放流=540p        ← 用户手动切 540P
+     *     21:39:46.890 检测到 1080p rank=1080 ← +5s，同集重配
+     *     21:39:46.891 原生控制器 S(1080p)    ← 用户的选择被打回
+     *     21:39:46.918 实际播放流=1080p
+     *
+     * 判据用 **VideoModel 实例**：`pz4.w.P/O` 的入参就是 `tTVideoEngine.getVideoModel()`
+     * （jadx 3149/3488），同一集内重配必是同一实例，换集必是新实例（`setVideoModel` 先触发）。
+     * 由于存的是**已应用的档位**而不是布尔量，「同集重配」被压住的同时，若这一集的可用档位
+     * 稍后才补上更高档（起播瞬间 supportResolutions 未就绪），下次仍会**升档** —— 不牺牲自动最高画质的语义。
+     */
+    private val gMaxQualityAppliedRank = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<Any, Int>()
+    )
+
     private val gKnownPercentSpeedPlayers = java.util.Collections.synchronizedMap(
         java.util.WeakHashMap<Any, Boolean>()
     )
@@ -2593,25 +2635,67 @@ object Hooks {
         try {
             gEngineMaxResolution[engine] = highest
         } catch (_: Throwable) {}
-        try {
-            val method = configResolutionMethodCache ?: engine.javaClass.methods.firstOrNull {
-                it.name == "configResolution" && it.parameterCount == 1 &&
-                    it.parameterTypes[0].isInstance(highest)
-            }?.also { configResolutionMethodCache = it } ?: return
-            method.invoke(engine, highest)
-            LogUtil.incr("maxQualityApply")
-        } catch (_: Throwable) {}
+        applyResolutionToEngineDirectly(engine, highest, "引擎侧路径")
     }
 
     /**
-     * 解析宿主「应用清晰度」的原生入口。
+     * 直接向引擎下发清晰度 —— **旁路**，绕过宿主入口。只允许在「宿主原生入口不可用」时调用，
+     * 判据见 [gNativeResolutionEntryUsable]。
+     *
+     * 为什么必须克制：原生入口（7.3.7.32 = `pz4.w.S`）一次完成「写宿主状态字段 + 下发引擎」；
+     * 只下发引擎 = 制造第二个所有者 → 「引擎播 1080p、按钮显示 720P」的状态分叉。
+     *
+     * 用 `methods` 而非 `getDeclaredMethod(name, highest.javaClass)`：后者要求参数类型
+     * **精确等于**声明类型，方法声明在父类上、或枚举常量带方法体（`javaClass` 变成子类）时
+     * 都会误判为「方法不存在」而静默失效。
+     */
+    private fun applyResolutionToEngineDirectly(engine: Any?, highest: Any?, why: String): Boolean {
+        if (engine == null || highest == null) return false
+        return try {
+            val method = configResolutionMethodCache ?: engine.javaClass.methods.firstOrNull {
+                it.name == "configResolution" && it.parameterCount == 1 &&
+                    it.parameterTypes[0].isInstance(highest)
+            }?.also { configResolutionMethodCache = it } ?: return false
+            method.invoke(engine, highest)
+            LogUtil.incr("maxQualityApply")
+            LogUtil.info("最高画质：引擎兜底下发 $highest（$why）")
+            true
+        } catch (e: Throwable) {
+            LogUtil.warn("最高画质：引擎兜底下发失败: $e")
+            false
+        }
+    }
+
+    /** 原生入口解析结果按控制器类缓存（见 [resolveResolutionApplyMethod]）。 */
+    private val gResolutionApplyMethodCache = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<Class<*>, java.lang.reflect.Method>()
+    )
+
+    /** 「名字表里的入口未命中」只告警一次，避免名字失效的版本每次播放都刷屏。 */
+    @Volatile private var gResolutionApplyMissWarned = false
+
+    /**
+     * 解析宿主「应用清晰度」的原生入口（结果按控制器类缓存）。
      *
      * 先按 [gNames.resolutionApplyMethod] 查；名字为空、或在类/父类链上找不到时，
      * 退化为**结构探测** —— R8 会把这类单字母方法名整体重排（7.3.1.32 `e0` →
      * 7.3.3.18 `q` → 7.3.7.32 `S`），但「参数恰好是 com.ss.ttvideoengine.Resolution、
      * 返回 void」这个形状跨版本稳定。只在**唯一命中**时采用，多候选一律不猜。
+     *
+     * 解析结果只与类结构有关、与具体档位无关（Resolution 常量同属一个枚举类），故按
+     * `controller.javaClass` 缓存；**未命中不缓存**（名字表可能被热更新替换，下次仍重试）。
      */
     private fun resolveResolutionApplyMethod(
+        controller: Any,
+        highest: Any,
+    ): java.lang.reflect.Method? {
+        gResolutionApplyMethodCache[controller.javaClass]?.let { return it }
+        val resolved = lookupResolutionApplyMethod(controller, highest)
+        if (resolved != null) gResolutionApplyMethodCache[controller.javaClass] = resolved
+        return resolved
+    }
+
+    private fun lookupResolutionApplyMethod(
         controller: Any,
         highest: Any,
     ): java.lang.reflect.Method? {
@@ -2626,7 +2710,10 @@ object Hooks {
                 if (hit != null) return hit.apply { isAccessible = true }
                 clazz = clazz.superclass
             }
-            LogUtil.warn("最高画质：配置的原生入口 $configured 未命中，改用结构探测")
+            if (!gResolutionApplyMissWarned) {
+                gResolutionApplyMissWarned = true
+                LogUtil.warn("最高画质：配置的原生入口 $configured 未命中，改用结构探测")
+            }
         }
         return try {
             val resolutionClass = Class.forName(
@@ -2661,6 +2748,8 @@ object Hooks {
         return try {
             val target = resolveResolutionApplyMethod(controller, highest) ?: return false
             target.invoke(controller, highest)
+            // 原生入口被证明可用 —— 此后所有「旁路写引擎」的兜底一律让位（见 gNativeResolutionEntryUsable）。
+            gNativeResolutionEntryUsable = true
             LogUtil.info("最高画质：原生控制器 ${target.name}($highest)")
             LogUtil.incr("maxQualityNativeApply")
             true
@@ -2678,19 +2767,13 @@ object Hooks {
         } catch (_: Throwable) { emptyList() }
         for ((controller, highest) in controllers) applyHighestViaController(controller, highest)
 
+        // 同上：原生入口可用时不再旁路写引擎 —— 上面的控制器分支已经把它设成最高档了。
+        if (gNativeResolutionEntryUsable) return
+
         val engines = try {
             synchronized(gEngineMaxResolution) { gEngineMaxResolution.entries.map { it.key to it.value } }
         } catch (_: Throwable) { emptyList() }
-        for ((engine, highest) in engines) {
-            try {
-                val method = engine.javaClass.methods.firstOrNull {
-                    it.name == "configResolution" && it.parameterCount == 1 &&
-                        it.parameterTypes[0].isInstance(highest)
-                } ?: continue
-                method.invoke(engine, highest)
-                LogUtil.incr("maxQualityApply")
-            } catch (_: Throwable) {}
-        }
+        for ((engine, highest) in engines) applyResolutionToEngineDirectly(engine, highest, "原生入口不可用")
     }
 
     private fun createNotification(ctx: Context) {
@@ -4641,6 +4724,11 @@ object Hooks {
                 } else null
                 for ((methodIndex, methodName) in gNames.resolutionModelMethods.withIndex()) {
                     ham(controllerClass, methodName, "maxQualityModel_${methodIndex}") { chain ->
+                        // 去重：M/O/P 中 P 与 O 体内都会再调 M（jadx 证实），三者都被本 hook 覆盖，
+                        // 宿主配置一次播放会命中 2~3 次。嵌套命中直接放行，只让最外层干活。
+                        val depth = gResolutionApplyDepth.get() ?: 0
+                        if (depth > 0) return@ham chain.proceed()
+
                         val controller = chain.thisObject
                         val model = try { chain.getArg(0) } catch (_: Throwable) { null }
                         val highest = findHighestResolution(model)
@@ -4655,30 +4743,46 @@ object Hooks {
                             gControllerMaxResolution[controller] = highest
                         }
 
-                        val result = chain.proceed()
+                        val result = try {
+                            gResolutionApplyDepth.set(depth + 1)
+                            chain.proceed()
+                        } finally {
+                            gResolutionApplyDepth.set(depth)
+                        }
                         try {
                             if (highest != null) {
-                                LogUtil.info("最高画质：检测到 $highest rank=${resolutionRank(highest)}")
-                                // 优先走**宿主自己的切画质入口**：它一次完成「写宿主状态字段 +
-                                // 下发引擎」，所以「引擎实际流 / 宿主状态 / 清晰度 UI」三者一致。
-                                // 只改引擎的旧做法见 docs/fullscreen-first-principles.md：
-                                // 绕开入口改结果 = 制造第二个所有者 → 状态分叉。
-                                val viaController = if (gMasterOn && gMaxQualityOn) {
-                                    applyHighestViaController(controller, highest)
+                                val tag = if (model != null) "@${System.identityHashCode(model)}" else ""
+                                val rank = resolutionRank(highest)
+                                val appliedRank = if (model != null) gMaxQualityAppliedRank[model] else null
+                                if (appliedRank != null && appliedRank >= rank) {
+                                    // 同一集内的重复配置（无缝切档 → 渲染开始再走一遍）：
+                                    // 此时用户可能已经手动选了低档，**不能再应用一次**，否则把人家的选择打回最高。
+                                    LogUtil.info("最高画质：检测到 $highest$tag rank=$rank 本集已应用$appliedRank，跳过（尊重用户手选）")
                                 } else {
-                                    false
-                                }
-                                if (!viaController && engineField != null) {
-                                    val engine = if (controller != null) engineField.get(controller) else null
-                                    rememberAndApplyHighestResolution(engine, model)
-                                } else if (!viaController && engineField == null &&
-                                    gMasterOn && gMaxQualityOn && result != null
-                                ) {
-                                    val targetVideoInfo = findVideoInfoByResolution(model, highest)
-                                    if (targetVideoInfo != null && targetVideoInfo !== result) {
-                                        LogUtil.info("最高画质：替换播放流 -> $highest")
-                                        LogUtil.incr("maxQualityApply")
-                                        return@ham targetVideoInfo
+                                    LogUtil.info("最高画质：检测到 $highest$tag rank=$rank")
+                                    // 优先走**宿主自己的切画质入口**：它一次完成「写宿主状态字段 +
+                                    // 下发引擎」，所以「引擎实际流 / 宿主状态 / 清晰度 UI」三者一致。
+                                    // 只改引擎的旧做法见 docs/fullscreen-first-principles.md：
+                                    // 绕开入口改结果 = 制造第二个所有者 → 状态分叉。
+                                    val viaController = if (gMasterOn && gMaxQualityOn) {
+                                        applyHighestViaController(controller, highest)
+                                    } else {
+                                        false
+                                    }
+                                    // 只有真正生效了才记「本集已应用到哪一档」，否则（入口缺失）留给兜底继续尝试。
+                                    if (viaController && model != null) gMaxQualityAppliedRank[model] = rank
+                                    if (!viaController && engineField != null) {
+                                        val engine = if (controller != null) engineField.get(controller) else null
+                                        rememberAndApplyHighestResolution(engine, model)
+                                    } else if (!viaController && engineField == null &&
+                                        gMasterOn && gMaxQualityOn && result != null
+                                    ) {
+                                        val targetVideoInfo = findVideoInfoByResolution(model, highest)
+                                        if (targetVideoInfo != null && targetVideoInfo !== result) {
+                                            LogUtil.info("最高画质：替换播放流 -> $highest")
+                                            LogUtil.incr("maxQualityApply")
+                                            return@ham targetVideoInfo
+                                        }
                                     }
                                 }
                             }
@@ -4692,8 +4796,10 @@ object Hooks {
                 // 引擎侧观察点 / 兜底：与「是否走原生入口」无关，始终安装。
                 // ① maxQualityDiag —— 观察引擎**实际**换到哪一档，是「引擎实际流」的地真，
                 //    用来验证「引擎流 / 宿主状态字段 / 清晰度 UI」三者是否一致；
-                // ② setVideoModel —— 登记该引擎的最高档，并在原生入口未命中时兜底直调引擎
-                //    （幂等：原生入口已把它设成最高档时，这次调用无副作用）。
+                // ② setVideoModel —— 登记该引擎的最高档；直捅引擎的兜底**只在原生入口不可用时**执行
+                //    （判据 gNativeResolutionEntryUsable）。原实现无条件执行，与其自身注释
+                //    「在原生入口未命中时兜底」不符：原生入口可用时这纯属冗余，且会把用户
+                //    手选的档位拉回最高 —— 与本次修复要消灭的「状态分叉」是同一个病，方向相反。
                 // 已移除 configResolution 拦截：它会把**用户手动切的低档**也强行拉回最高，
                 // 与「尊重用户选择」冲突；且 2026-09-14 实测手切 540P 时它从未命中。
                 val engineClass = Class.forName("com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
@@ -4717,19 +4823,19 @@ object Hooks {
                         if (engine != null && highest != null) {
                             gEngineMaxResolution[engine] = highest
                             LogUtil.info("最高画质：model 来源 $highest")
-                            if (gMasterOn && gMaxQualityOn) {
-                                try {
-                                    engineClass.getDeclaredMethod("configResolution", highest.javaClass)
-                                        .invoke(engine, highest)
-                                    LogUtil.incr("maxQualityApply")
-                                    LogUtil.info("最高画质：已请求引擎切换 $highest（兜底）")
-                                } catch (_: Throwable) {}
+                            if (!gNativeResolutionEntryUsable) {
+                                applyResolutionToEngineDirectly(engine, highest, "原生入口不可用")
                             }
                         }
                     } catch (_: Throwable) {}
                     result
                 }
-                LogUtil.info("  ✓ 默认最高画质 ${gNames.resolutionController}.${gNames.resolutionApplyMethod}（原生入口）+ TTVideoEngine 观察点")
+                // 措辞必须与实际路径一致：入口名为空时走的是结构探测，不是「原生入口」。
+                val entryDesc = gNames.resolutionApplyMethod.ifBlank { "(空→结构探测)" }
+                LogUtil.info(
+                    "  ✓ 默认最高画质 入口=${gNames.resolutionController}.$entryDesc"
+                        + " + 引擎观察点（旁路兜底仅在入口不可用时启用）"
+                )
             } catch (e: Throwable) {
                 LogUtil.warn("  默认最高画质 Hook 失败: $e")
             }
