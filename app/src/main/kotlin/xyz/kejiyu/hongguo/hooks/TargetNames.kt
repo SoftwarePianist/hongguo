@@ -497,10 +497,16 @@ object TargetNames {
         pauseAdEntryClass = "com.dragon.read.component.shortvideo.impl.inject.view.l4",
         pauseAdEntryMethod = "b",
 
+        // 切清晰度的**原生入口**（7.3.7.32 补回；7.3.5.32 起该字段丢失，导致退化成
+        // 直接捅引擎 TTVideoEngine.configResolution）。jadx 证实 pz4.w.S(Resolution)：
+        //   ① `this.f367705b = resolution` 写宿主自己的清晰度状态（UI/菜单/按钮读它）
+        //   ② `tTVideoEngine.configResolution(resolution)` 再下发给引擎
+        //   ③ `hp4.q.f302741f = true` 打上「用户已配置清晰度」标记
+        // 只做 ② 不做 ①，就会出现「引擎播 1080p、按钮显示 720P」的状态分叉。
         resolutionController = "pz4.w",
         resolutionModelMethods = listOf("M", "O", "P"),
         resolutionEngineField = "",
-        resolutionApplyMethod = "",
+        resolutionApplyMethod = "S",
 
         // 旧表 fullscreen.f$d / d$d 已不再实现 onDoubleTap；该版本为 fullscreen.i$d。
         doubleTapHandlers = listOf("com.dragon.read.component.shortvideo.impl.fullscreen.i\$d"),

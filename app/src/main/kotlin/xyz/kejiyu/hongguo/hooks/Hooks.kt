@@ -2603,21 +2603,65 @@ object Hooks {
         } catch (_: Throwable) {}
     }
 
-    private fun applyHighestViaController(controller: Any?, highest: Any?): Boolean {
-        if (controller == null || highest == null || gNames.resolutionApplyMethod.isBlank()) return false
-        return try {
+    /**
+     * 解析宿主「应用清晰度」的原生入口。
+     *
+     * 先按 [gNames.resolutionApplyMethod] 查；名字为空、或在类/父类链上找不到时，
+     * 退化为**结构探测** —— R8 会把这类单字母方法名整体重排（7.3.1.32 `e0` →
+     * 7.3.3.18 `q` → 7.3.7.32 `S`），但「参数恰好是 com.ss.ttvideoengine.Resolution、
+     * 返回 void」这个形状跨版本稳定。只在**唯一命中**时采用，多候选一律不猜。
+     */
+    private fun resolveResolutionApplyMethod(
+        controller: Any,
+        highest: Any,
+    ): java.lang.reflect.Method? {
+        val configured = gNames.resolutionApplyMethod
+        if (configured.isNotBlank()) {
             var clazz: Class<*>? = controller.javaClass
-            var target: java.lang.reflect.Method? = null
-            while (clazz != null && target == null) {
-                target = clazz.declaredMethods.firstOrNull {
-                    it.name == gNames.resolutionApplyMethod && it.parameterCount == 1 &&
+            while (clazz != null) {
+                val hit = clazz.declaredMethods.firstOrNull {
+                    it.name == configured && it.parameterCount == 1 &&
                         it.parameterTypes[0].isInstance(highest)
-                }?.apply { isAccessible = true }
+                }
+                if (hit != null) return hit.apply { isAccessible = true }
                 clazz = clazz.superclass
             }
-            if (target == null) return false
+            LogUtil.warn("最高画质：配置的原生入口 $configured 未命中，改用结构探测")
+        }
+        return try {
+            val resolutionClass = Class.forName(
+                "com.ss.ttvideoengine.Resolution",
+                false,
+                controller.javaClass.classLoader,
+            )
+            var clazz: Class<*>? = controller.javaClass
+            while (clazz != null) {
+                val hits = clazz.declaredMethods.filter {
+                    it.parameterCount == 1 && it.returnType == Void.TYPE &&
+                        it.parameterTypes[0] == resolutionClass
+                }
+                if (hits.size == 1) return hits[0].apply { isAccessible = true }
+                if (hits.size > 1) {
+                    LogUtil.warn(
+                        "最高画质：结构探测出现多个 (Resolution)void 候选，放弃：${hits.joinToString { it.name }}"
+                    )
+                    return null
+                }
+                clazz = clazz.superclass
+            }
+            null
+        } catch (e: Throwable) {
+            LogUtil.warn("最高画质：结构探测失败: $e")
+            null
+        }
+    }
+
+    private fun applyHighestViaController(controller: Any?, highest: Any?): Boolean {
+        if (controller == null || highest == null) return false
+        return try {
+            val target = resolveResolutionApplyMethod(controller, highest) ?: return false
             target.invoke(controller, highest)
-            LogUtil.info("最高画质：原生控制器 ${gNames.resolutionApplyMethod}($highest)")
+            LogUtil.info("最高画质：原生控制器 ${target.name}($highest)")
             LogUtil.incr("maxQualityNativeApply")
             true
         } catch (e: Throwable) {
@@ -4615,12 +4659,21 @@ object Hooks {
                         try {
                             if (highest != null) {
                                 LogUtil.info("最高画质：检测到 $highest rank=${resolutionRank(highest)}")
-                                if (gNames.resolutionApplyMethod.isNotBlank()) {
-                                    if (gMasterOn && gMaxQualityOn) applyHighestViaController(controller, highest)
-                                } else if (engineField != null) {
+                                // 优先走**宿主自己的切画质入口**：它一次完成「写宿主状态字段 +
+                                // 下发引擎」，所以「引擎实际流 / 宿主状态 / 清晰度 UI」三者一致。
+                                // 只改引擎的旧做法见 docs/fullscreen-first-principles.md：
+                                // 绕开入口改结果 = 制造第二个所有者 → 状态分叉。
+                                val viaController = if (gMasterOn && gMaxQualityOn) {
+                                    applyHighestViaController(controller, highest)
+                                } else {
+                                    false
+                                }
+                                if (!viaController && engineField != null) {
                                     val engine = if (controller != null) engineField.get(controller) else null
                                     rememberAndApplyHighestResolution(engine, model)
-                                } else if (gMasterOn && gMaxQualityOn && result != null) {
+                                } else if (!viaController && engineField == null &&
+                                    gMasterOn && gMaxQualityOn && result != null
+                                ) {
                                     val targetVideoInfo = findVideoInfoByResolution(model, highest)
                                     if (targetVideoInfo != null && targetVideoInfo !== result) {
                                         LogUtil.info("最高画质：替换播放流 -> $highest")
@@ -4636,68 +4689,47 @@ object Hooks {
                     }
                 }
 
-                if (gNames.resolutionApplyMethod.isBlank()) {
-                    val engineClass = Class.forName("com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
-                    try {
-                        val vcDiagClass = Class.forName(gNames.playbackState, false, classLoader)
-                        ham(vcDiagClass, "onVideoStreamBitrateChanged", "maxQualityDiag") { chain ->
-                            try {
-                                val res = chain.getArg(0)
-                                LogUtil.info("最高画质：实际播放流=$res")
-                            } catch (_: Throwable) {}
-                            chain.proceed()
-                        }
-                    } catch (_: Throwable) {}
-                    ham(engineClass, "setVideoModel", "maxQualityModelSource") { chain ->
-                        val result = chain.proceed()
+                // 引擎侧观察点 / 兜底：与「是否走原生入口」无关，始终安装。
+                // ① maxQualityDiag —— 观察引擎**实际**换到哪一档，是「引擎实际流」的地真，
+                //    用来验证「引擎流 / 宿主状态字段 / 清晰度 UI」三者是否一致；
+                // ② setVideoModel —— 登记该引擎的最高档，并在原生入口未命中时兜底直调引擎
+                //    （幂等：原生入口已把它设成最高档时，这次调用无副作用）。
+                // 已移除 configResolution 拦截：它会把**用户手动切的低档**也强行拉回最高，
+                // 与「尊重用户选择」冲突；且 2026-09-14 实测手切 540P 时它从未命中。
+                val engineClass = Class.forName("com.ss.ttvideoengine.TTVideoEngine", false, classLoader)
+                try {
+                    val vcDiagClass = Class.forName(gNames.playbackState, false, classLoader)
+                    ham(vcDiagClass, "onVideoStreamBitrateChanged", "maxQualityDiag") { chain ->
                         try {
-                            gLastVideoModelAt = android.os.SystemClock.uptimeMillis()
-                            val engine = chain.thisObject
-                            val model = chain.getArg(0)
-                            val highest = findHighestResolution(model)
-                            if (engine != null && highest != null) {
-                                gEngineMaxResolution[engine] = highest
-                                LogUtil.info("最高画质：model 来源 $highest")
-                                if (gMasterOn && gMaxQualityOn) {
-                                    try {
-                                        engineClass.getDeclaredMethod("configResolution", highest.javaClass)
-                                            .invoke(engine, highest)
-                                        LogUtil.incr("maxQualityApply")
-                                        LogUtil.info("最高画质：已请求引擎切换 $highest")
-                                    } catch (_: Throwable) {}
-                                }
-                            }
-                        } catch (_: Throwable) {}
-                        result
-                    }
-                    ham(engineClass, "configResolution", "maxQualityConfig") { chain ->
-                        if (!gMasterOn || !gMaxQualityOn) return@ham chain.proceed()
-                        val engine = chain.thisObject
-                        var highest = try { gEngineMaxResolution[engine] } catch (_: Throwable) { null }
-                        if (highest == null) {
-                            try {
-                                val model = engineClass.getDeclaredMethod("getVideoModel").invoke(engine)
-                                highest = findHighestResolution(model)
-                                if (highest != null) gEngineMaxResolution[engine] = highest
-                            } catch (_: Throwable) {}
-                        }
-                        if (highest == null) return@ham chain.proceed()
-                        try {
-                            val requested = chain.getArg(0)
-                            if (requested !== highest && resolutionRank(requested) < resolutionRank(highest)) {
-                                val args = (chain.args as Array<Any?>).copyOf()
-                                args[0] = highest
-                                LogUtil.info("最高画质：拦截 $requested -> $highest")
-                                LogUtil.incr("maxQualityOverride")
-                                return@ham chain.proceed(args)
-                            }
+                            val res = chain.getArg(0)
+                            LogUtil.info("最高画质：实际播放流=$res")
                         } catch (_: Throwable) {}
                         chain.proceed()
                     }
-                    LogUtil.info("  ✓ 默认最高画质 ${gNames.resolutionController} + TTVideoEngine")
-                } else {
-                    LogUtil.info("  ✓ 默认最高画质 ${gNames.resolutionController}.${gNames.resolutionApplyMethod}（原生切画质链）")
+                } catch (_: Throwable) {}
+                ham(engineClass, "setVideoModel", "maxQualityModelSource") { chain ->
+                    val result = chain.proceed()
+                    try {
+                        gLastVideoModelAt = android.os.SystemClock.uptimeMillis()
+                        val engine = chain.thisObject
+                        val model = chain.getArg(0)
+                        val highest = findHighestResolution(model)
+                        if (engine != null && highest != null) {
+                            gEngineMaxResolution[engine] = highest
+                            LogUtil.info("最高画质：model 来源 $highest")
+                            if (gMasterOn && gMaxQualityOn) {
+                                try {
+                                    engineClass.getDeclaredMethod("configResolution", highest.javaClass)
+                                        .invoke(engine, highest)
+                                    LogUtil.incr("maxQualityApply")
+                                    LogUtil.info("最高画质：已请求引擎切换 $highest（兜底）")
+                                } catch (_: Throwable) {}
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                    result
                 }
+                LogUtil.info("  ✓ 默认最高画质 ${gNames.resolutionController}.${gNames.resolutionApplyMethod}（原生入口）+ TTVideoEngine 观察点")
             } catch (e: Throwable) {
                 LogUtil.warn("  默认最高画质 Hook 失败: $e")
             }
