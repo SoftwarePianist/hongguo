@@ -94,10 +94,6 @@ object Hooks {
 
     @Volatile private var gSuppressDoubleTapLikeUntil = 0L
 
-    private val gForcedShortMaskVisibility = java.util.Collections.synchronizedMap(
-        java.util.WeakHashMap<View, Int>()
-    )
-
     private data class SavedViewState(var visibility: Int, val alpha: Float)
     private val gSavedViewStates = java.util.Collections.synchronizedMap(
         java.util.WeakHashMap<View, SavedViewState>()
@@ -113,9 +109,6 @@ object Hooks {
         java.util.WeakHashMap<View, PauseForcedState>()
     )
 
-    private val gCleanMaskViews = java.util.Collections.synchronizedMap(
-        java.util.WeakHashMap<View, Boolean>()
-    )
     private val gInternalViewMutation = object : ThreadLocal<Boolean>() {
         override fun initialValue(): Boolean = false
     }
@@ -183,7 +176,6 @@ object Hooks {
     )
 
     private val gVideoToolbarLayers = mutableListOf<java.lang.ref.WeakReference<Any>>()
-    private val gToolbarBaseLayers = mutableListOf<java.lang.ref.WeakReference<Any>>()
     private data class ShortVideoHolderState(
         val ref: java.lang.ref.WeakReference<Any>,
         var playbackState: Int,
@@ -191,8 +183,6 @@ object Hooks {
     )
     private val gShortVideoHolders = mutableListOf<ShortVideoHolderState>()
     private val gShortSeriesFragments =
-        mutableListOf<java.lang.ref.WeakReference<Any>>()
-    private val gCnHomeFragments =
         mutableListOf<java.lang.ref.WeakReference<Any>>()
     private var gLastVideoStateAt = 0L
     private var gLastVideoStateReason = "init"
@@ -1524,8 +1514,6 @@ object Hooks {
                 (v.parent as? View)?.requestLayout()
             } catch (_: Throwable) {}
         }
-        synchronized(gForcedShortMaskVisibility) { gForcedShortMaskVisibility.clear() }
-        synchronized(gCleanMaskViews) { gCleanMaskViews.clear() }
         if (entries.isNotEmpty()) LogUtil.info("restore saved views: ${entries.size}")
     }
     private fun forceOnePauseRestoreView(v: View?) {
@@ -1680,7 +1668,6 @@ object Hooks {
         mainHandler.post {
             restoreFeedViewportBottomMargins(clear = false)
             restoreBottomLayoutReclaim()
-            restoreShortVideoNativeControls()
             val roots = collectAllWindows()
             for (root in roots) {
                 scanTreeRestore(root)
@@ -1695,10 +1682,8 @@ object Hooks {
     private fun restoreAfterSeriesDetailExit() {
         mainHandler.post {
             if (shouldApplyUiHiding()) return@post
-            restoreShortVideoNativeControls()
             restorePauseForcedViews()
             restoreAllSavedViews()
-            setVideoToolbarsVisible(true)
             applyCleanTop(gCurrentActivity)
             applyNavBar(gCurrentActivity)
         }
@@ -1891,342 +1876,26 @@ object Hooks {
         return null
     }
 
-    private fun shouldForceShortVideoCleanMask(): Boolean {
-        return shouldApplyUiHiding() && gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)
-    }
+    // ── 全屏播放控制层与清屏遮罩：已按方案 A 全部交还宿主 ─────────────────────────
+    // 历史（已删）：这里曾有 shouldForceShortVideoCleanMask() + 清屏遮罩强制 INVISIBLE
+    // （rememberAndForceShortVideoMaskInvisible / restoreForcedShortVideoMask /
+    //   setOneShortVideoMaskClear / syncShortVideoMasks）。
+    // 删除理由（第一性原理，见 docs/fullscreen-first-principles.md）：
+    //   宿主把「控制层/遮罩该不该可见」记在自己的状态字段里（fullscreen.f.f158498v），
+    //   并由 sd(boolean,boolean) 的入参**直接写入**该字段，同时在「显示」动作内 arm 一个
+    //   5000ms 一次性计时器负责自动隐藏。模块在旁路强改可见性/改写入参 ⇒ 宿主状态机失步
+    //   ⇒ 「停着不收 / 点了没反应 / 点了方向反」全部出现，且**每一轮补收都是在补结果**。
+    //   ⇒ 结论：这块 UI 的显隐只由宿主拥有，模块不再写入（P1 单一权威 / P2 写入必走宿主入口）。
 
-    private fun rememberAndForceShortVideoMaskInvisible(holder: Any) {
-        try {
-            val mask = findFieldValue(holder, gNames.shortMaskField) as? View ?: return
-            if (mask.visibility != View.VISIBLE) return
-            synchronized(gForcedShortMaskVisibility) {
-                if (!gForcedShortMaskVisibility.containsKey(mask)) {
-                    gForcedShortMaskVisibility[mask] = mask.visibility
-                }
-            }
-            rememberViewState(mask)
-            synchronized(gCleanMaskViews) { gCleanMaskViews[mask] = true }
-            setModuleVisibility(mask, View.INVISIBLE)
-            LogUtil.incr("shortMaskDirectFallback")
-        } catch (e: Throwable) {
-            LogUtil.warn("force short-video mask invisible failed: ${holder.javaClass.name}: $e")
-        }
-    }
+    // 历史（已删）：国内版首页 fragment 的「清屏遮罩强制 INVISIBLE」子系统
+    // （registerCnHomeFragment / cnHomeFragmentSnapshot / forceCnHomeFragmentMaskInvisible /
+    //   syncCnHomeFragmentMasks + cnHomeMask hook）。同上：旁路改结果，已交还宿主。
 
-    private fun restoreForcedShortVideoMask(holder: Any) {
-        try {
-            val mask = findFieldValue(holder, gNames.shortMaskField) as? View ?: return
-            val original = synchronized(gForcedShortMaskVisibility) {
-                gForcedShortMaskVisibility.remove(mask)
-            } ?: return
-
-            synchronized(gCleanMaskViews) { gCleanMaskViews.remove(mask) }
-            val saved = synchronized(gSavedViewStates) { gSavedViewStates[mask] }
-            if (saved != null) restoreView(mask) else internalViewMutation { mask.visibility = original }
-            LogUtil.incr("shortMaskDirectRestore")
-        } catch (e: Throwable) {
-            LogUtil.warn("restore short-video mask failed: ${holder.javaClass.name}: $e")
-        }
-    }
-
-    private fun setOneShortVideoMaskClear(holder: Any, clear: Boolean) {
-        try {
-
-            if (clear) rememberAndForceShortVideoMaskInvisible(holder)
-            else restoreForcedShortVideoMask(holder)
-        } catch (e: Throwable) {
-            LogUtil.warn("set short-video mask clear=$clear failed: ${holder.javaClass.name}: $e")
-        }
-    }
-
-    private fun syncShortVideoMasks() {
-        val holders = shortVideoHolderSnapshot().asReversed()
-        if (shouldForceShortVideoCleanMask()) {
-            var handledVisibleHolder = false
-            for ((holder, _) in holders) {
-                if (!isShortVideoHolderVisible(holder)) continue
-                setOneShortVideoMaskClear(holder, true)
-                handledVisibleHolder = true
-            }
-
-            if (!handledVisibleHolder) holders.firstOrNull()?.first?.let {
-                setOneShortVideoMaskClear(it, true)
-            }
-            return
-        }
-
-        for ((holder, _) in holders) restoreForcedShortVideoMask(holder)
-    }
-
-    private fun registerCnHomeFragment(fragment: Any?) {
-        if (fragment == null || gPkg != "com.phoenix.read") return
-        synchronized(gCnHomeFragments) {
-            gCnHomeFragments.removeAll { it.get() == null }
-            val old = gCnHomeFragments.firstOrNull { it.get() === fragment }
-            if (old != null) gCnHomeFragments.remove(old)
-            gCnHomeFragments.add(java.lang.ref.WeakReference(fragment))
-        }
-    }
-
-    private fun cnHomeFragmentSnapshot(): List<Any> = synchronized(gCnHomeFragments) {
-        val result = mutableListOf<Any>()
-        val it = gCnHomeFragments.iterator()
-        while (it.hasNext()) {
-            val item = it.next().get()
-            if (item == null) it.remove() else result.add(item)
-        }
-        result
-    }
-
-    private fun forceCnHomeFragmentMaskInvisible(fragment: Any) {
-        if (gPkg != "com.phoenix.read" || !shouldForceShortVideoCleanMask()) return
-        try {
-            val fieldName = gNames.homeFragmentMaskField
-            if (fieldName.isBlank()) return
-            val mask = findFieldValue(fragment, fieldName) as? View ?: return
-            if (mask.visibility != View.VISIBLE) return
-            rememberViewState(mask)
-            synchronized(gCleanMaskViews) { gCleanMaskViews[mask] = true }
-            setModuleVisibility(mask, View.INVISIBLE)
-            LogUtil.incr("homeFragmentMaskHide")
-        } catch (e: Throwable) {
-            LogUtil.warn("home fragment mask hide failed: $e")
-        }
-    }
-
-    private fun syncCnHomeFragmentMasks() {
-        if (gPkg != "com.phoenix.read") return
-        if (shouldForceShortVideoCleanMask()) {
-            for (fragment in cnHomeFragmentSnapshot().asReversed()) {
-                forceCnHomeFragmentMaskInvisible(fragment)
-            }
-        } else {
-            for (fragment in cnHomeFragmentSnapshot().asReversed()) {
-                try {
-                    val fieldName = gNames.homeFragmentMaskField
-                    if (fieldName.isBlank()) continue
-                    val mask = findFieldValue(fragment, fieldName) as? View ?: continue
-                    restoreView(mask)
-                } catch (_: Throwable) {}
-            }
-        }
-    }
-
-    private fun setOneShortVideoControlsVisible(holder: Any, visible: Boolean) {
-        if (!visible) return
-        var managerHandled = false
-        try {
-            val cleanScreenManager = findFieldValue(holder, gNames.shortCleanManagerField)
-            if (cleanScreenManager != null) {
-                cleanScreenManager.javaClass.getDeclaredMethod("b", Boolean::class.java).apply {
-                    isAccessible = true
-                }.invoke(cleanScreenManager, false)
-                managerHandled = true
-            }
-        } catch (e: Throwable) {
-            LogUtil.warn("exit short-video clean screen failed: $e")
-        }
-
-        try {
-            holder.javaClass.getMethod(gNames.shortControlsMethod, Boolean::class.java, Boolean::class.java)
-                .invoke(holder, false, true)
-        } catch (e: Throwable) {
-            if (!managerHandled) {
-                LogUtil.warn("show short-video controls failed: ${holder.javaClass.name}: $e")
-            }
-        }
-    }
-
-    /**
-     * 隐藏短剧 Holder 的全部控制层（含横屏全屏页左右两侧的锁屏 / 亮度 / 音量）。
-     *
-     * 与 [setOneShortVideoControlsVisible] 严格对称 —— 那条链路把控制层「显示」出来，
-     * 但**恢复播放时只隐藏了工具栏层**（gVideoToolbarLayers 里只有 ToolbarLayerFixed /
-     * CustomizeToolbarLayer，不含宿主自管的横屏侧边按钮），于是被「顺手」显示出来的
-     * 锁屏 / 亮度 / 音量再没有任何路径收回去 → 常驻不消失。
-     *
-     * 触发场景（2026-09-14 实测定位）：进横屏全屏页时宿主重建播放器会产生约 1ms 的
-     * 瞬时 pause→resume。因为用户刚点过「全屏观看」按钮，暂停恢复的 baseDelay 落在
-     * isUserClick 分支（=0）→ 当帧就执行 restoreAllControls()；而紧接着的 resume
-     * 分支只管工具栏层 → 三个按钮留在屏幕上。关闭「暂停后恢复所有控件」即恢复正常
-     * （已用 A/B 对照验证），确认是这条链路。
-     *
-     * 修法：对称调用同一个宿主入口 `sd(true, *)`，让宿主自己把所有控制层收回去 ——
-     * 不去逐个猜每个按钮归哪个管理器持有，行为与宿主自身一致。
-     */
-    private fun setOneShortVideoControlsHidden(holder: Any) {
-        if (gNames.shortControlsMethod.isBlank()) {
-            LogUtil.warn("hide short-video native controls: shortControlsMethod 为空，跳过")
-            return
-        }
-        try {
-            holder.javaClass.getMethod(
-                gNames.shortControlsMethod,
-                Boolean::class.java,
-                Boolean::class.java,
-            ).invoke(holder, true, true)
-            LogUtil.incr("shortNativeControlsHide")
-        } catch (e: Throwable) {
-            LogUtil.warn("hide short-video native controls failed: ${holder.javaClass.name}: $e")
-        }
-    }
-
-    // 「暂停恢复」会把宿主控制层（含横屏侧边按钮）显示出来，而宿主**不会**替模块收回
-    // （程序化显示不会启动宿主自身的自动隐藏计时器）—— 必须由模块自己补收。
-    // 但**不能用一次性的 post**：进全屏 / 切集会在几十毫秒内再翻转一次 paused，
-    // 单次 post 执行时被守卫拦下后就**永久丢失**（历史现象：恢复播放后侧边按钮仍常驻）。
-    // 故用 pending 标记跨暂停保留，直到在「播放态」真正收回成功为止。
-    private var gNativeControlsHidePending = false
-
-    private fun hideShortVideoNativeControls(force: Boolean = false) {
-        if (!gMasterOn) return
-        gNativeControlsHidePending = true
-        mainHandler.post { tryHideShortVideoNativeControls(force) }
-    }
-
-    // ── 控制层收回：事件驱动 + 有限次核对（替代原先的 1s 常驻轮询）───────────────
-    // 触发源全部是**已存在**的 hook，零常态开销、不新增任何 hook：
-    //   ① sd(boolean, boolean)：宿主与模块「显示 / 隐藏控制层」都经过它。真机探针实测
-    //      （2026-09-14 19:12:02）用户点一下空白处 → **宿主自己**调 sd(false, true) 显示控制层；
-    //      19:12:07 宿主自己的 5s 计时器把它收回了 → 非强制态下宿主计时器本身是好的。
-    //   ② 用户点击：dispatchTouchEvent 早已被 hook（见 gLastUserClickAt），兜底覆盖那些
-    //      **不经 sd** 的显示路径（实测存在：19:10:41 三按钮可见，但同期 sd 流里没有任何显示调用）。
-    // 触发后只排**有限次**核对（首次 3s，最多 3 次，每次间隔 1.5s）：既不像一次性 post 会被状态
-    // 翻转吞掉，也不像轮询那样长期空转 —— 收回成功、或确认本就无需收回，就自然结束。
-    // 另注：模块在播放态会把宿主的 sd(false, *) 改写成隐藏，但**改写并不总能真的挡住显示**
-    // （实测 19:10 照样出现了），所以改写的同时也要排这一次核对：挡成功时它空跑即退，挡失败时它是兜底。
-    @Volatile private var gNativeRetractAttempts = 0
-    @Volatile private var gNativeRetractRetries = 0
-    private var gNativeRetractRunnable: Runnable? = null
-    private val gNativeRetractInitialDelayMs = 3000L
-    private val gNativeRetractRetryMs = 1500L
-    private val gNativeRetractMaxAttempts = 3
-    private val gNativeRetractMaxRetries = 4
-    private val gNativeRetractQuietMs = 2000L
-    private val gNativePauseRestoreQuietMs = 4000L
-
-    /** 事件源入口：有人显示控制层、或用户点了一下 → 排一次有限核对。 */
-    private fun armNativeControlsRetract() {
-        if (!gMasterOn) return
-        gNativeRetractAttempts = 0
-        gNativeRetractRetries = 0
-        scheduleNativeRetractTick(gNativeRetractInitialDelayMs)
-    }
-
-    private fun cancelNativeControlsRetract() {
-        gNativeRetractRunnable?.let { mainHandler.removeCallbacks(it) }
-        gNativeRetractRunnable = null
-    }
-
-    private fun scheduleNativeRetractTick(delayMs: Long) {
-        cancelNativeControlsRetract()
-        val r = object : Runnable {
-            override fun run() {
-                gNativeRetractRunnable = null
-                if (!gMasterOn) return
-                val act = gCurrentActivity ?: return
-                if (!isLandscapeFullscreenActivity(act)) return
-                val now = android.os.SystemClock.uptimeMillis()
-                // 暂停态：与宿主自身一致地「静默 4s 后收回」（宿主在暂停态也会自动隐藏，实测 19:12:07）。
-                // 重试次数有限，兜底交给 resume 分支 —— 不会退化成长期空转。
-                if (gVideoPaused) {
-                    if (!nativeSideControlsVisible()) return
-                    if (now - gLastUserClickAt < gNativePauseRestoreQuietMs) {
-                        if (gNativeRetractRetries++ < gNativeRetractMaxRetries) {
-                            scheduleNativeRetractTick(gNativeRetractRetryMs)
-                        }
-                        return
-                    }
-                    gNativeRetractAttempts++
-                    LogUtil.info("native controls retract (paused): attempt=$gNativeRetractAttempts")
-                    hideShortVideoNativeControls(force = true)
-                    return
-                }
-                if (!nativeSideControlsVisible()) return
-                // 用户正在操作（拖进度条 / 调音量）→ 让路，静默后再收。
-                if (now - gLastUserClickAt < gNativeRetractQuietMs) {
-                    if (gNativeRetractRetries++ < gNativeRetractMaxRetries) {
-                        scheduleNativeRetractTick(gNativeRetractRetryMs)
-                    }
-                    return
-                }
-                if (gNativeRetractAttempts >= gNativeRetractMaxAttempts) return
-                gNativeRetractAttempts++
-                LogUtil.info("native controls retract (event-driven): attempt=$gNativeRetractAttempts")
-                hideShortVideoNativeControls()
-                if (gNativeRetractAttempts < gNativeRetractMaxAttempts) {
-                    scheduleNativeRetractTick(gNativeRetractRetryMs)
-                }
-            }
-        }
-        gNativeRetractRunnable = r
-        mainHandler.postDelayed(r, delayMs)
-    }
-
-    // ID 用**名称**解析：资源 ID 是 aapt 生成的，每次发版整体漂移，名称才稳定。
-    private val nativeSideControlNames = arrayOf(
-        "full_screen_lock_view",
-        "full_screen_brightness_control",
-        "full_screen_volume_control",
-    )
-
-    /** 三个侧边按钮里只要有一个可见，就说明宿主控制层没收回去。 */
-    private fun nativeSideControlsVisible(): Boolean {
-        val act = gCurrentActivity ?: return false
-        return try {
-            for (name in nativeSideControlNames) {
-                val id = act.resources.getIdentifier(name, "id", gPkg)
-                if (id == 0) continue
-                val v = act.findViewById<View>(id) ?: continue
-                if (v.visibility == View.VISIBLE && v.alpha > 0.01f) return true
-            }
-            false
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private fun tryHideShortVideoNativeControls(force: Boolean = false) {
-        if (!gMasterOn) {
-            gNativeControlsHidePending = false
-            return
-        }
-        val snap = shortVideoHolderSnapshot()
-        // 门禁必须与「显示侧」严格对称 —— 这是本 bug 的核心。
-        // 显示链路 restoreAllControls() → restoreShortVideoNativeControls() → sd(false,true)
-        // **没有任何门禁**（不查 gControlOn / gPlayerOn / shouldApplyUiHiding）。
-        // 隐藏侧若额外加门，就会出现「显示侧放行、隐藏侧被拦」→ 控件常驻。
-        // 因此只保留总开关 + 「当前不是暂停态」（暂停时控件本就该显示；force 用于暂停态补收）。
-        if (gVideoPaused && !force) {
-            // 又回到暂停态：保留 pending，等下一次 resume 再补收（绝不丢）。
-            return
-        }
-        var handled = false
-        for ((holder, _) in snap.asReversed()) {
-            if (!isShortVideoHolderVisible(holder)) continue
-            setOneShortVideoControlsHidden(holder)
-            handled = true
-        }
-        if (!handled) snap.firstOrNull()?.first?.let { setOneShortVideoControlsHidden(it) }
-        gNativeControlsHidePending = false
-    }
-
-    private fun restoreShortVideoNativeControls() {
-        val holders = shortVideoHolderSnapshot().asReversed()
-        var restoredVisibleHolder = false
-        for ((holder, _) in holders) {
-            if (!isShortVideoHolderVisible(holder)) continue
-            setOneShortVideoControlsVisible(holder, true)
-            restoreForcedShortVideoMask(holder)
-            shortVideoHolderRoot(holder)?.requestLayout()
-            restoredVisibleHolder = true
-        }
-
-        if (!restoredVisibleHolder) holders.firstOrNull()?.first?.let {
-            setOneShortVideoControlsVisible(it, true)
-            restoreForcedShortVideoMask(it)
-        }
-    }
+    // 历史（已删）：setOneShortVideoControlsVisible() 与 restoreShortVideoNativeControls() ——
+    // 模块**程序化**调宿主入口 sd(false,*) 把控制层显示出来（暂停恢复 / 关开关时用）。
+    // 真机实测（2026-09-14 20:30:08）这条路径本身就是残留源：模块 sd(false,true) 之后
+    // 宿主不会替程序化显示 arm 自己的 5s 计时器 → 7s 后锁屏/亮度/音量仍在屏幕上。
+    // 加上模块已不再隐藏任何控制层，这条「恢复」既无对象也无必要 ⇒ 整体移除。
 
     private fun registerVideoToolbarLayer(layer: Any?) {
         if (layer == null) return
@@ -2243,13 +1912,8 @@ object Hooks {
             gVideoToolbarLayers.add(java.lang.ref.WeakReference(layer))
         }
         if (added) LogUtil.info("video layer registered: ${layer.javaClass.name}")
-        if (added && gMasterOn && gPlayerOn) {
-            // 新构造图层默认可见：构造hook内同步隐藏（此时View未挂树未绘制，零闪现）；用户暂停窗口保持可见
-            val userPauseWindow = gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause()
-            val show = !userPauseWindow
-            if (android.os.Looper.myLooper() == mainHandler.looper) setOneVideoToolbarVisible(layer, show)
-            else mainHandler.post { setOneVideoToolbarVisible(layer, show) }
-        }
+        // 历史（已删）：这里曾在新图层构造时主动 setOneVideoToolbarVisible(layer,false) 隐藏工具栏。
+        // 那是「模块写控制层可见性」，已交还宿主（方案 A，见 docs/fullscreen-first-principles.md）。
     }
     private fun videoToolbarLayerSnapshot(): List<Any> = synchronized(gVideoToolbarLayers) {
         val result = mutableListOf<Any>()
@@ -2261,73 +1925,11 @@ object Hooks {
         result
     }
 
-    private fun registerToolbarBaseLayer(layer: Any?) {
-        if (layer == null) return
-        synchronized(gToolbarBaseLayers) {
-            gToolbarBaseLayers.removeAll { it.get() == null }
-            val old = gToolbarBaseLayers.firstOrNull { it.get() === layer }
-            if (old != null) gToolbarBaseLayers.remove(old)
-            gToolbarBaseLayers.add(java.lang.ref.WeakReference(layer))
-        }
-    }
-
-    private fun toolbarBaseLayerSnapshot(): List<Any> = synchronized(gToolbarBaseLayers) {
-        val out = mutableListOf<Any>()
-        val it = gToolbarBaseLayers.iterator()
-        while (it.hasNext()) {
-            val v = it.next().get()
-            if (v == null) it.remove() else out.add(v)
-        }
-        out
-    }
-
-    private fun setToolbarBaseVisible(visible: Boolean) {
-        for (layer in toolbarBaseLayerSnapshot()) {
-            try {
-                var type: Class<*>? = layer.javaClass
-                var method: java.lang.reflect.Method? = null
-                while (type != null && method == null) {
-                    method = try { type.getDeclaredMethod("a", Boolean::class.java) } catch (_: Throwable) { null }
-                    type = type.superclass
-                }
-                method?.apply { isAccessible = true }?.invoke(layer, visible)
-            } catch (_: Throwable) {}
-        }
-    }
-
-    private fun setOneVideoToolbarVisible(layer: Any, visible: Boolean) {
-        try {
-            when (layer.javaClass.name) {
-                "com.dragon.read.pages.video.layers.toolbarlayer.ToolbarLayerFixed" ->
-                    layer.javaClass.getDeclaredMethod(gNames.fixedToolbarShowMethod, Boolean::class.java).apply { isAccessible = true }.invoke(layer, visible)
-                "com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer" ->
-                    layer.javaClass.getDeclaredMethod(gNames.customizeToolbarShowMethod, Boolean::class.java).apply { isAccessible = true }.invoke(layer, visible)
-            }
-        } catch (e: Throwable) {
-            LogUtil.warn("set video toolbar visible=$visible failed: ${layer.javaClass.name}: $e")
-        }
-    }
-
-    private fun setVideoToolbarsVisible(visible: Boolean) {
-        if (!visible && !shouldApplyUiHiding()) return
-        mainHandler.post {
-            for (layer in videoToolbarLayerSnapshot()) {
-                setOneVideoToolbarVisible(layer, visible)
-
-                if (visible && layer.javaClass.name == "com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer") {
-                    try {
-                        layer.javaClass.getDeclaredMethod(
-                            gNames.customizeToolbarApplyMethod,
-                            Boolean::class.java,
-                            Boolean::class.java,
-                            Boolean::class.java,
-                        ).apply { isAccessible = true }.invoke(layer, true, false, false)
-                    } catch (_: Throwable) {}
-                }
-            }
-            setToolbarBaseVisible(visible)
-        }
-    }
+    // 历史（已删）：工具栏可见性操作整套 —— registerToolbarBaseLayer / toolbarBaseLayerSnapshot /
+    // setToolbarBaseVisible / setOneVideoToolbarVisible / setVideoToolbarsVisible。
+    // 它们都是「模块直接改写播放器工具栏层（顶部/底部栏）的可见性」：
+    // ① 隐藏方向会让宿主以为已显示（状态分叉）；② 程序化显示宿主不会 arm 自己的自动隐藏计时器
+    // ⇒ 实测进全屏后侧边控件会常驻（20:30:08 模块 sd(false,true) 后 7s 仍在）。两者都已交还宿主。
 
     private fun detectPausedFromVideoLayers(): Boolean? {
 
@@ -2392,7 +1994,6 @@ object Hooks {
             if (!changed) return
             gPauseStartedAt = android.os.SystemClock.uptimeMillis()
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
-            cancelNativeControlsRetract()
             val isCompletedPause = reason.contains("completed")
             val isUserClick = android.os.SystemClock.uptimeMillis() - gLastUserClickAt < 800L
             val baseDelay = when {
@@ -2416,7 +2017,6 @@ object Hooks {
                     }
                     restoreAllControls()
                     restoreNativeBottomWindowColor(gCurrentActivity)
-                    setVideoToolbarsVisible(true)
                     forcePauseRestoreControls()
                     LogUtil.info("video paused: restore controls, reason=$reason")
 
@@ -2428,31 +2028,14 @@ object Hooks {
                             mainHandler.post { scanAllWindows() }
                         }
                     }, 2500L)
-
-                    // 「暂停恢复」显示的是模块**程序化**调起的控制层，宿主不会为它启动自动隐藏
-                    // 计时器（只有真实点击才会）→ 非点击场景下侧边按钮会永久残留（实测 50s+）。
-                    // 收敛逻辑统一走 armNativeControlsRetract()：暂停态等静默 4s 后收回，
-                    // 用户正在操作时自动让路（触发源见该函数上方注释）。
-                    armNativeControlsRetract()
                 }
             }
             gPauseRestoreRunnable = r
             mainHandler.postDelayed(r, baseDelay)
         } else {
-            val hadPauseRestore = gPauseRestoreRunnable != null
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
             gPauseRestoreRunnable = null
-            cancelNativeControlsRetract()
             restorePauseForcedViews()
-            if (gPlayerOn) setVideoToolbarsVisible(false)
-            // 对称补偿：暂停恢复曾把控制层（含横屏侧边按钮）显示出来，而上面只隐藏了工具栏层。
-            // hadPauseRestore：本次暂停确实安排过恢复 → 需要补收；
-            // pending：上一次补收被瞬时 pause 拦下未完成 → 借这次 resume 重试，避免永久丢失。
-            if (hadPauseRestore || gNativeControlsHidePending) {
-                hideShortVideoNativeControls()
-                // 这次补收只有一次机会（hadPauseRestore 随即被消费）→ 排一次有限核对确认它真的生效。
-                armNativeControlsRetract()
-            }
             if (changed) {
                 LogUtil.info("video resumed: hide controls, reason=$reason")
                 if (first) {
@@ -2549,10 +2132,6 @@ object Hooks {
 
             scanTreeUnified(decor)
 
-            if (gControlOn) {
-                syncShortVideoMasks()
-                syncCnHomeFragmentMasks()
-            }
             if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused)) {
                 enforceNativeMainBottomHidden(act)
                 enforceKnownFeedViewportBottomMargin()
@@ -3108,8 +2687,6 @@ object Hooks {
         savePref("master_on", gMasterOn)
         if (!gMasterOn) {
             restoreAllSavedViews()
-            restoreShortVideoNativeControls()
-            setVideoToolbarsVisible(true)
         }
         createNotification(ctx)
         applyToCurrent()
@@ -3594,9 +3171,7 @@ object Hooks {
                 gMasterOn = it
                 if (!it) {
                     restoreAllSavedViews()
-                    restoreShortVideoNativeControls()
                     restoreNativeBottomWindowColor(gCurrentActivity)
-                    setVideoToolbarsVisible(true)
                 }
             }, "master_on", true)
 
@@ -3607,15 +3182,15 @@ object Hooks {
                 if (!it) {
 
                     restoreAllSavedViews()
-                    restoreShortVideoNativeControls()
                     restoreNativeBottomWindowColor(gCurrentActivity)
-                    mainHandler.postDelayed({ restoreShortVideoNativeControls(); scanAllWindows() }, 120L)
+                    mainHandler.postDelayed({ scanAllWindows() }, 120L)
                 }
             }, "control_hide")
             addSwitch("选集相关功能", "隐藏联播页顶部和底部的选集相关控件", { gPlayerOn }, {
                 gPlayerOn = it
-                if (!it || (gRestoreControlsOnPause && gVideoPaused)) setVideoToolbarsVisible(true)
-                else setVideoToolbarsVisible(false)
+                // 历史（已删）：开启时 setVideoToolbarsVisible(false)、关闭时 setVideoToolbarsVisible(true)
+                // —— 模块直接改写播放器工具栏层（播放页顶部/底部栏）的可见性，两个方向都已交还宿主。
+                // 本开关仍生效的部分：「选集条」的隐藏由 scanTreeUnified 的 seriesToolbarKind 分支负责。
             }, "player_bar")
             addSwitch("隐藏视频进度条", "隐藏首页和连续播放页的进度条", { gProgressOff }, {
                 gProgressOff = it
@@ -5504,7 +5079,8 @@ object Hooks {
 
                 registerShortVideoHolder(chain.thisObject, 0)
                 if (gMasterOn && !(gRestoreControlsOnPause && gVideoPaused)) {
-                    if (gPlayerOn) setVideoToolbarsVisible(false)
+                    // 历史（已删）：这里曾在 onBind 时 setVideoToolbarsVisible(false) 主动收起
+                    // 播放器工具栏 —— 那是「模块写控制层可见性」，已交还宿主（方案 A）。
                     val holderRoot = shortVideoHolderRoot(chain.thisObject)
                     if (holderRoot != null) scanTreeUnified(holderRoot)
                 }
@@ -5521,81 +5097,26 @@ object Hooks {
                     .setId("shortNativeClean")
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
-                        // 事件源①：任何一方「显示控制层」（arg0=false）都排一次有限次核对。
-                        // 隐藏（arg0=true）**不取消** —— 由核对自己从视图地真确认并结束，
-                        // 这样不会因「隐藏请求没真正生效」而丢掉重试机会。
-                        val showRequested = try {
-                            (chain.getArg(0) as? Boolean) == false
-                        } catch (_: Throwable) {
-                            false
-                        }
-                        if (showRequested && gMasterOn) armNativeControlsRetract()
-                        if (!shouldForceShortVideoCleanMask()) return@Hooker chain.proceed()
+                        // 【只观察，不改写】方案 A：全屏控制层显隐完全交还宿主。
+                        // 这里曾经把 sd(false,*) 改写成 sd(true,*) 来强制清屏 —— 但 sd 的入参
+                        // 就是宿主状态字段 f158498v 的赋值，改写等于**替宿主写下"不可见"**，
+                        // 连带让宿主"显示"动作里的 5s 自动隐藏计时器不再被 arm ⇒ 控件永久残留、
+                        // 点按方向反转（详见 docs/fullscreen-first-principles.md）。
+                        // 保留这个 hook 只为一件事：录下宿主调用序列，作为验收判据 V1
+                        // （「开模块后与原生逐条一致」）的观察点。
                         try {
-                            val requested = chain.getArg(0) as? Boolean
-                            if (requested == false) {
-                                val args = (chain.args as Array<Any?>).copyOf()
-                                args[0] = true
-                                LogUtil.incr("shortNativeCleanForce")
-                                return@Hooker chain.proceed(args)
-                            }
+                            LogUtil.info("V1 sd(${chain.getArg(0)},${chain.getArg(1)})")
                         } catch (_: Throwable) {}
                         chain.proceed()
                     })
-                LogUtil.info("  ✓ native clean-screen ${gNames.shortHolder}.${gNames.shortControlsMethod}")
+                LogUtil.info("  ✓ native clean-screen 观察点（不改写）: ${gNames.shortHolder}.${gNames.shortControlsMethod}")
             } catch (e: Throwable) {
                 LogUtil.warn("  native clean-screen hook missing: $e")
             }
-
-            module.hook(c.getDeclaredMethod(gNames.shortMaskMethod, Boolean::class.java))
-                .setId("shortMask")
-                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                .intercept(Hooker { chain ->
-                    val result = chain.proceed()
-                    if (shouldForceShortVideoCleanMask()) rememberAndForceShortVideoMaskInvisible(chain.thisObject)
-                    result
-                })
         } catch (_: Throwable) {}
 
-        if (gPkg == "com.phoenix.read") {
-            try {
-                val homeFragment = Class.forName(
-                    "com.dragon.read.component.shortvideo.impl.v2.SeriesBookMallTabFragment",
-                    false,
-                    classLoader,
-                )
-                hac(homeFragment, "cnHomeFragmentCtor") { chain ->
-                    val result = chain.proceed()
-                    registerCnHomeFragment(chain.thisObject)
-                    result
-                }
-                val homeMaskMethod = gNames.homeFragmentMaskMethod
-                if (homeMaskMethod.isBlank()) throw NoSuchMethodException("homeFragmentMaskMethod blank")
-                module.hook(homeFragment.getDeclaredMethod(homeMaskMethod, Boolean::class.java))
-                    .setId("cnHomeMask")
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(Hooker { chain ->
-                        registerCnHomeFragment(chain.thisObject)
-
-                        val result = if (shouldForceShortVideoCleanMask()) {
-                            try {
-                                val requested = chain.getArg(0) as? Boolean
-                                if (requested == false) {
-                                    val args = (chain.args as Array<Any?>).copyOf()
-                                    args[0] = true
-                                    LogUtil.incr("homeNativeCleanForce")
-                                    chain.proceed(args)
-                                } else chain.proceed()
-                            } catch (_: Throwable) { chain.proceed() }
-                        } else chain.proceed()
-                        forceCnHomeFragmentMaskInvisible(chain.thisObject)
-                        result
-                    })
-                LogUtil.info("  ✓ CN home fragment mask ${gNames.homeFragmentMaskMethod}/${gNames.homeFragmentMaskField}")
-            } catch (e: Throwable) {
-                LogUtil.warn("  CN home fragment mask missing: $e")
-            }
-        }
+        // 历史（已删）：国内版首页 fragment 的清屏遮罩 hook（cnHomeMask / cnHomeFragmentCtor）——
+        // 与 shortMask 同源，都是「旁路改结果」，按方案 A 交还宿主。
 
         LogUtil.info("  ✓ short-video playback detectors: $shortPlaybackHookCount")
 
@@ -5673,7 +5194,8 @@ object Hooks {
                 setVideoPaused(false, "LayerHostMediaLayout#onVideoPlay")
                 scheduleDefaultSpeedApply("LayerHostMediaLayout#onVideoPlay")
                 if (gMasterOn && gPlayerOn && !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) {
-                    setVideoToolbarsVisible(false)
+                    // 历史（已删）：这里曾在每次起播时 setVideoToolbarsVisible(false) 收起工具栏
+                    // —— 同属「模块写控制层可见性」，已交还宿主（方案 A）。
                     mainHandler.post { scanAllWindows() }
                 }
                 result
@@ -5700,25 +5222,25 @@ object Hooks {
             try { registerVideoToolbarLayer(chain.thisObject) } catch (_: Throwable) {}
         }
 
+        // 当前行为：**只登记、不拦截**。
+        // 历史（已删）：这四个 hook（pb/pt/ctS/gt7c）曾把宿主「显示工具栏」的调用吞掉（返回 null）。
+        // 吞掉别人的调用 = 宿主以为显示成功、实际没显示 ⇒ 与「模块改写 sd 入参」同类的状态分叉
+        // （docs/fullscreen-first-principles.md §2 第 3 类）。播放器顶部/底部工具栏的显隐已交还宿主。
         try { val c = Class.forName("com.dragon.read.pages.video.layers.toolbarlayer.ToolbarLayerFixed", false, classLoader)
-            ham(c, gNames.fixedToolbarShowMethod, "pb") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("btmBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
-            LogUtil.info("  ✓ playerBtm") } catch (e: Exception) { LogUtil.warn("  ToolbarLayerFixed 未找到") }
+            ham(c, gNames.fixedToolbarShowMethod, "pb") { chain -> trackLayerFromCall(chain); chain.proceed() }
+            LogUtil.info("  ✓ playerBtm（仅登记）") } catch (e: Exception) { LogUtil.warn("  ToolbarLayerFixed 未找到") }
 
         try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
-            ham(c, gNames.customizeToolbarShowMethod, "pt") { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } }
-            LogUtil.info("  ✓ playerTop") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer 未找到") }
+            ham(c, gNames.customizeToolbarShowMethod, "pt") { chain -> trackLayerFromCall(chain); chain.proceed() }
+            LogUtil.info("  ✓ playerTop（仅登记）") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer 未找到") }
 
         try { val c = Class.forName("com.dragon.read.pages.video.customizelayers.CustomizeToolbarLayer", false, classLoader)
-            module.hook(c.getDeclaredMethod(gNames.customizeToolbarApplyMethod, Boolean::class.java, Boolean::class.java, Boolean::class.java)).setId("ctS").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> trackLayerFromCall(chain); if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("topBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() } })
-            LogUtil.info("  ✓ CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod}") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod} 未找到") }
+            module.hook(c.getDeclaredMethod(gNames.customizeToolbarApplyMethod, Boolean::class.java, Boolean::class.java, Boolean::class.java)).setId("ctS").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> trackLayerFromCall(chain); chain.proceed() })
+            LogUtil.info("  ✓ CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod}（仅登记）") } catch (e: Exception) { LogUtil.warn("  CustomizeToolbarLayer.${gNames.customizeToolbarApplyMethod} 未找到") }
 
-        try { val c = Class.forName(gNames.toolbarBase, false, classLoader)
-            hac(c, "toolbarBaseCtor") { chain -> val r = chain.proceed(); registerToolbarBaseLayer(chain.thisObject); r }
-            module.hook(c.getDeclaredMethod("a", Boolean::class.java)).setId("gt7c").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain ->
-                registerToolbarBaseLayer(chain.thisObject)
-                if (!gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { LogUtil.incr("toolbarBlock"); null } else chain.proceed() } catch (_: Exception) { chain.proceed() }
-            })
-            LogUtil.info("  ✓ ${gNames.toolbarBase}.a") } catch (e: Exception) { LogUtil.warn("  ${gNames.toolbarBase} 未找到") }
+        // 历史（已删）：toolbarBase 的构造 hook + `a(boolean)` hook（id "gt7c"）。
+        // 它们此前唯一的作用是登记 toolbarBase 图层，供 setToolbarBaseVisible() 改写其可见性；
+        // 该改写已随「工具栏可见性操作整套」移除 ⇒ 登记本身也失去用途，一并删除（少两个反射 hook）。
 
         try {
             val mgrClass = Class.forName("com.dragon.read.base.ssconfig.SsConfigMgr", false, classLoader)
@@ -5789,7 +5311,8 @@ object Hooks {
 
         try { var rc: Class<*>? = null; try { rc = Class.forName("com.dragon.read.component.biz.impl.bookmall.holder.video.VideoRedPacketHolder", false, classLoader) } catch (_: Exception) {}; if (rc != null) { hac(rc, "rp") { chain -> if (!gMasterOn || !gAdOn) chain.proceed() else { val r = chain.proceed(); try { val iv = chain.thisObject.javaClass.getField("itemView").get(chain.thisObject) as? View; iv?.visibility = View.GONE; iv?.layoutParams = ViewGroup.LayoutParams(0, 0) } catch (_: Exception) {}; r } }; LogUtil.info("  ✓ redPack") } } catch (e: Exception) { LogUtil.warn("redPack: $e") }
 
-        try { val c = Class.forName(gNames.shortHolder, false, classLoader); module.hook(c.getDeclaredMethod(gNames.shortLandscapeMethod, Boolean::class.java)).setId("fb").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (!gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) chain.proceed() else try { if (chain.getArg(0) as? Boolean == true) { val na = (chain.args as Array<Any?>).copyOf(); na[0] = false; chain.proceed(na) } else chain.proceed() } catch (_: Exception) { chain.proceed() } }); LogUtil.info("  ✓ ${gNames.shortHolder}.${gNames.shortLandscapeMethod}") } catch (e: Exception) { LogUtil.warn("  ${gNames.shortHolder} 未找到") }
+        // 历史（已删）：shortHolder.<shortLandscapeMethod>(boolean) 的入参改写 hook（id "fb"）。
+        // 它把 true 改成 false，属于「篡改宿主状态入参」；横屏全屏页的行为已交还宿主（方案 A）。
 
         try {
             val c = Class.forName("android.view.LayoutInflater", false, classLoader)
@@ -5831,7 +5354,10 @@ object Hooks {
                     LogUtil.incr("setVis")
                     if (targetVisibility == View.VISIBLE && view != null) {
                         val replacement = when {
-                            shouldForceShortVideoCleanMask() && synchronized(gCleanMaskViews) { gCleanMaskViews.containsKey(view) } -> View.INVISIBLE
+                            // 历史（已删）：曾在此拦「清屏遮罩」的 setVisibility(VISIBLE) 改成 INVISIBLE
+                            // （条件 shouldForceShortVideoCleanMask() && gCleanMaskViews 命中）。
+                            // 那是「全屏播放控制层/遮罩」的旁路写入，已交还宿主（方案 A）。
+                            // 下面几条属于首页/feed 的界面精简，不在本次范围内。
                             gRefreshOff && (synchronized(gKnownRefreshAccessoryViews) { gKnownRefreshAccessoryViews.containsKey(view) } || isRefreshAccessoryContainer(view)) -> {
                                 synchronized(gKnownRefreshAccessoryViews) { gKnownRefreshAccessoryViews[view] = true }
                                 View.GONE
@@ -5910,7 +5436,7 @@ object Hooks {
         try { val c = Class.forName("androidx.swiperefreshlayout.widget.SwipeRefreshLayout", false, classLoader); module.hook(c.getDeclaredMethod("onInterceptTouchEvent", android.view.MotionEvent::class.java)).setId("sw").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gRefreshOff) false else chain.proceed() }); LogUtil.info("  ✓ swipe") } catch (e: Exception) { LogUtil.warn("  SwipeRefreshLayout 未找到") }
 
         try { val c = Class.forName(gNames.topZoneTouch, false, classLoader); module.hook(c.getDeclaredMethod("onTouchEvent", android.view.MotionEvent::class.java)).setId("tz1").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ ${gNames.topZoneTouch}") } catch (e: Exception) { LogUtil.warn("  ${gNames.topZoneTouch} 未找到") }
-        try { val c = Class.forName("android.app.Activity", false, classLoader); module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)).setId("tz2").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> try { val ev = chain.getArg(0) as? android.view.MotionEvent; if (ev != null) { when (ev.actionMasked) { android.view.MotionEvent.ACTION_DOWN -> { gTouchDownX = ev.x; gTouchDownY = ev.y } android.view.MotionEvent.ACTION_UP -> { if (kotlin.math.abs(ev.x - gTouchDownX) < 25f && kotlin.math.abs(ev.y - gTouchDownY) < 25f) { gLastUserClickAt = android.os.SystemClock.uptimeMillis(); if (isLandscapeFullscreenActivity(gCurrentActivity)) armNativeControlsRetract() } } else -> {} } } } catch (_: Throwable) {}; if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ dispatchTouch") } catch (e: Exception) { LogUtil.error("tz2", e) }
+        try { val c = Class.forName("android.app.Activity", false, classLoader); module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)).setId("tz2").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> try { val ev = chain.getArg(0) as? android.view.MotionEvent; if (ev != null) { when (ev.actionMasked) { android.view.MotionEvent.ACTION_DOWN -> { gTouchDownX = ev.x; gTouchDownY = ev.y } android.view.MotionEvent.ACTION_UP -> { if (kotlin.math.abs(ev.x - gTouchDownX) < 25f && kotlin.math.abs(ev.y - gTouchDownY) < 25f) { gLastUserClickAt = android.os.SystemClock.uptimeMillis() } } else -> {} } } } catch (_: Throwable) {}; if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ dispatchTouch") } catch (e: Exception) { LogUtil.error("tz2", e) }
 
         // 应隐藏状态下 app 将目标UI设为可见时同步改回隐藏，消除切集闪现（与收藏/评论的零闪现机制对齐）
         try {
@@ -6083,8 +5609,6 @@ object Hooks {
                                     savePref("master_on", checked)
                                     if (!checked) {
                                         restoreAllSavedViews()
-                                        restoreShortVideoNativeControls()
-                                        setVideoToolbarsVisible(true)
                                     }
                                     val notificationCtx = appCtx ?: gCurrentActivity?.applicationContext
                                     if (notificationCtx != null) createNotification(notificationCtx)
