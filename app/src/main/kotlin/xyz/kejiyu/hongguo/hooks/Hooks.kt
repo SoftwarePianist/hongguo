@@ -2084,45 +2084,84 @@ object Hooks {
         mainHandler.post { tryHideShortVideoNativeControls(force) }
     }
 
-    // 「暂停恢复」的补收计时器。宿主只会为**用户真实点击**触发的显示启动自动隐藏计时器；
-    // 模块用 sd(false,true) 程序化显示的控制层宿主不会计时 → 若这次暂停是进全屏 / 切集
-    // 产生的瞬时 pause（非用户点击），侧边按钮就会永久残留（实测 50s+ 不消失）。
-    // 故模块自己补一个与宿主一致的「静默 4s 后收回」。
-    private var gPauseRestoreRetractRunnable: Runnable? = null
+    // ── 控制层收回：事件驱动 + 有限次核对（替代原先的 1s 常驻轮询）───────────────
+    // 触发源全部是**已存在**的 hook，零常态开销、不新增任何 hook：
+    //   ① sd(boolean, boolean)：宿主与模块「显示 / 隐藏控制层」都经过它。真机探针实测
+    //      （2026-09-14 19:12:02）用户点一下空白处 → **宿主自己**调 sd(false, true) 显示控制层；
+    //      19:12:07 宿主自己的 5s 计时器把它收回了 → 非强制态下宿主计时器本身是好的。
+    //   ② 用户点击：dispatchTouchEvent 早已被 hook（见 gLastUserClickAt），兜底覆盖那些
+    //      **不经 sd** 的显示路径（实测存在：19:10:41 三按钮可见，但同期 sd 流里没有任何显示调用）。
+    // 触发后只排**有限次**核对（首次 3s，最多 3 次，每次间隔 1.5s）：既不像一次性 post 会被状态
+    // 翻转吞掉，也不像轮询那样长期空转 —— 收回成功、或确认本就无需收回，就自然结束。
+    // 另注：模块在播放态会把宿主的 sd(false, *) 改写成隐藏，但**改写并不总能真的挡住显示**
+    // （实测 19:10 照样出现了），所以改写的同时也要排这一次核对：挡成功时它空跑即退，挡失败时它是兜底。
+    @Volatile private var gNativeRetractAttempts = 0
+    @Volatile private var gNativeRetractRetries = 0
+    private var gNativeRetractRunnable: Runnable? = null
+    private val gNativeRetractInitialDelayMs = 3000L
+    private val gNativeRetractRetryMs = 1500L
+    private val gNativeRetractMaxAttempts = 3
+    private val gNativeRetractMaxRetries = 4
+    private val gNativeRetractQuietMs = 2000L
+    private val gNativePauseRestoreQuietMs = 4000L
 
-    private fun schedulePauseRestoreRetract() {
-        gPauseRestoreRetractRunnable?.let { mainHandler.removeCallbacks(it) }
-        val r = object : Runnable {
-            override fun run() {
-                gPauseRestoreRetractRunnable = null
-                if (!gMasterOn || !gRestoreControlsOnPause || !gVideoPaused) return
-                // 用户正在操作（拖进度条 / 点按钮）→ 不抢控件，等静默后再收。
-                if (android.os.SystemClock.uptimeMillis() - gLastUserClickAt < 2500L) {
-                    schedulePauseRestoreRetract()
-                    return
-                }
-                LogUtil.info("pause restore auto-retract: hide native controls")
-                hideShortVideoNativeControls(force = true)
-            }
-        }
-        gPauseRestoreRetractRunnable = r
-        mainHandler.postDelayed(r, 4000L)
+    /** 事件源入口：有人显示控制层、或用户点了一下 → 排一次有限核对。 */
+    private fun armNativeControlsRetract() {
+        if (!gMasterOn) return
+        gNativeRetractAttempts = 0
+        gNativeRetractRetries = 0
+        scheduleNativeRetractTick(gNativeRetractInitialDelayMs)
     }
 
-    // ── 侧边控件（锁屏 / 亮度 / 音量）的低频自愈看护 ────────────────────────────
-    // 为什么需要：模块此前只有「pause → resume」这一个收回触发点，但**宿主自己**也会显示
-    // 控制层 —— 用户点一下屏幕空白处，宿主就把控制层显示出来。而宿主的自动隐藏计时器在这个
-    // 状态下并不可靠。2026-09-14 实测（ebb811b）：
-    //   18:26:23.956 播放 → 模块在 resume 分支收回成功（像素 0.00）
-    //   18:26:26.674 用户点空白处 → 三按钮重新出现，此后**模块日志一行都没有**
-    //   18:29:0x     已过 3 分钟仍可见（像素 1.39/1.20/1.24）；再点一次空白处才收回
-    // 即：这类残留模块全程无动作，只能靠用户再点一次 —— 与「控件该自己消失」的预期不符。
-    // 做法：不再依赖任何单次事件（历史教训：一次性 post 会被状态翻转吞掉；按 12s 窗口也会漏掉
-    // 宿主发起的显示），改成周期性核对**视图地真**：横屏全屏页 + 播放态 + 用户静默 + 侧边按钮
-    // 仍可见 → 补收。节奏与宿主自身对工具栏的自动隐藏一致（实测宿主 4~9s）。
-    @Volatile private var gSideWatchRunning = false
-    private val gSideWatchIntervalMs = 1000L
-    private val gSideWatchIdleMs = 3000L
+    private fun cancelNativeControlsRetract() {
+        gNativeRetractRunnable?.let { mainHandler.removeCallbacks(it) }
+        gNativeRetractRunnable = null
+    }
+
+    private fun scheduleNativeRetractTick(delayMs: Long) {
+        cancelNativeControlsRetract()
+        val r = object : Runnable {
+            override fun run() {
+                gNativeRetractRunnable = null
+                if (!gMasterOn) return
+                val act = gCurrentActivity ?: return
+                if (!isLandscapeFullscreenActivity(act)) return
+                val now = android.os.SystemClock.uptimeMillis()
+                // 暂停态：与宿主自身一致地「静默 4s 后收回」（宿主在暂停态也会自动隐藏，实测 19:12:07）。
+                // 重试次数有限，兜底交给 resume 分支 —— 不会退化成长期空转。
+                if (gVideoPaused) {
+                    if (!nativeSideControlsVisible()) return
+                    if (now - gLastUserClickAt < gNativePauseRestoreQuietMs) {
+                        if (gNativeRetractRetries++ < gNativeRetractMaxRetries) {
+                            scheduleNativeRetractTick(gNativeRetractRetryMs)
+                        }
+                        return
+                    }
+                    gNativeRetractAttempts++
+                    LogUtil.info("native controls retract (paused): attempt=$gNativeRetractAttempts")
+                    hideShortVideoNativeControls(force = true)
+                    return
+                }
+                if (!nativeSideControlsVisible()) return
+                // 用户正在操作（拖进度条 / 调音量）→ 让路，静默后再收。
+                if (now - gLastUserClickAt < gNativeRetractQuietMs) {
+                    if (gNativeRetractRetries++ < gNativeRetractMaxRetries) {
+                        scheduleNativeRetractTick(gNativeRetractRetryMs)
+                    }
+                    return
+                }
+                if (gNativeRetractAttempts >= gNativeRetractMaxAttempts) return
+                gNativeRetractAttempts++
+                LogUtil.info("native controls retract (event-driven): attempt=$gNativeRetractAttempts")
+                hideShortVideoNativeControls()
+                if (gNativeRetractAttempts < gNativeRetractMaxAttempts) {
+                    scheduleNativeRetractTick(gNativeRetractRetryMs)
+                }
+            }
+        }
+        gNativeRetractRunnable = r
+        mainHandler.postDelayed(r, delayMs)
+    }
 
     // ID 用**名称**解析：资源 ID 是 aapt 生成的，每次发版整体漂移，名称才稳定。
     private val nativeSideControlNames = arrayOf(
@@ -2145,33 +2184,6 @@ object Hooks {
         } catch (_: Throwable) {
             false
         }
-    }
-
-    private fun startSideControlsWatchIfNeeded() {
-        if (gSideWatchRunning) return
-        gSideWatchRunning = true
-        val r = object : Runnable {
-            override fun run() {
-                try {
-                    sideControlsWatchTick()
-                } catch (_: Throwable) {
-                }
-                mainHandler.postDelayed(this, gSideWatchIntervalMs)
-            }
-        }
-        mainHandler.postDelayed(r, gSideWatchIntervalMs)
-    }
-
-    private fun sideControlsWatchTick() {
-        if (!gMasterOn) return
-        val act = gCurrentActivity ?: return
-        if (!isLandscapeFullscreenActivity(act)) return
-        if (!nativeSideControlsVisible()) return
-        // 暂停态控件本就该显示；用户正在操作时不抢。
-        if (gVideoPaused) return
-        if (android.os.SystemClock.uptimeMillis() - gLastUserClickAt < gSideWatchIdleMs) return
-        LogUtil.info("side controls idle retract: hide native controls")
-        hideShortVideoNativeControls()
     }
 
     private fun tryHideShortVideoNativeControls(force: Boolean = false) {
@@ -2380,8 +2392,7 @@ object Hooks {
             if (!changed) return
             gPauseStartedAt = android.os.SystemClock.uptimeMillis()
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
-            gPauseRestoreRetractRunnable?.let { mainHandler.removeCallbacks(it) }
-            gPauseRestoreRetractRunnable = null
+            cancelNativeControlsRetract()
             val isCompletedPause = reason.contains("completed")
             val isUserClick = android.os.SystemClock.uptimeMillis() - gLastUserClickAt < 800L
             val baseDelay = when {
@@ -2420,8 +2431,9 @@ object Hooks {
 
                     // 「暂停恢复」显示的是模块**程序化**调起的控制层，宿主不会为它启动自动隐藏
                     // 计时器（只有真实点击才会）→ 非点击场景下侧边按钮会永久残留（实测 50s+）。
-                    // 故模块自己补一个与宿主一致的「静默 4s 后收回」；用户正在操作时自动让路。
-                    schedulePauseRestoreRetract()
+                    // 收敛逻辑统一走 armNativeControlsRetract()：暂停态等静默 4s 后收回，
+                    // 用户正在操作时自动让路（触发源见该函数上方注释）。
+                    armNativeControlsRetract()
                 }
             }
             gPauseRestoreRunnable = r
@@ -2430,14 +2442,17 @@ object Hooks {
             val hadPauseRestore = gPauseRestoreRunnable != null
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
             gPauseRestoreRunnable = null
-            gPauseRestoreRetractRunnable?.let { mainHandler.removeCallbacks(it) }
-            gPauseRestoreRetractRunnable = null
+            cancelNativeControlsRetract()
             restorePauseForcedViews()
             if (gPlayerOn) setVideoToolbarsVisible(false)
             // 对称补偿：暂停恢复曾把控制层（含横屏侧边按钮）显示出来，而上面只隐藏了工具栏层。
             // hadPauseRestore：本次暂停确实安排过恢复 → 需要补收；
             // pending：上一次补收被瞬时 pause 拦下未完成 → 借这次 resume 重试，避免永久丢失。
-            if (hadPauseRestore || gNativeControlsHidePending) hideShortVideoNativeControls()
+            if (hadPauseRestore || gNativeControlsHidePending) {
+                hideShortVideoNativeControls()
+                // 这次补收只有一次机会（hadPauseRestore 随即被消费）→ 排一次有限核对确认它真的生效。
+                armNativeControlsRetract()
+            }
             if (changed) {
                 LogUtil.info("video resumed: hide controls, reason=$reason")
                 if (first) {
@@ -5506,6 +5521,15 @@ object Hooks {
                     .setId("shortNativeClean")
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(Hooker { chain ->
+                        // 事件源①：任何一方「显示控制层」（arg0=false）都排一次有限次核对。
+                        // 隐藏（arg0=true）**不取消** —— 由核对自己从视图地真确认并结束，
+                        // 这样不会因「隐藏请求没真正生效」而丢掉重试机会。
+                        val showRequested = try {
+                            (chain.getArg(0) as? Boolean) == false
+                        } catch (_: Throwable) {
+                            false
+                        }
+                        if (showRequested && gMasterOn) armNativeControlsRetract()
                         if (!shouldForceShortVideoCleanMask()) return@Hooker chain.proceed()
                         try {
                             val requested = chain.getArg(0) as? Boolean
@@ -5886,7 +5910,7 @@ object Hooks {
         try { val c = Class.forName("androidx.swiperefreshlayout.widget.SwipeRefreshLayout", false, classLoader); module.hook(c.getDeclaredMethod("onInterceptTouchEvent", android.view.MotionEvent::class.java)).setId("sw").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gRefreshOff) false else chain.proceed() }); LogUtil.info("  ✓ swipe") } catch (e: Exception) { LogUtil.warn("  SwipeRefreshLayout 未找到") }
 
         try { val c = Class.forName(gNames.topZoneTouch, false, classLoader); module.hook(c.getDeclaredMethod("onTouchEvent", android.view.MotionEvent::class.java)).setId("tz1").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ ${gNames.topZoneTouch}") } catch (e: Exception) { LogUtil.warn("  ${gNames.topZoneTouch} 未找到") }
-        try { val c = Class.forName("android.app.Activity", false, classLoader); module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)).setId("tz2").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> try { val ev = chain.getArg(0) as? android.view.MotionEvent; if (ev != null) { when (ev.actionMasked) { android.view.MotionEvent.ACTION_DOWN -> { gTouchDownX = ev.x; gTouchDownY = ev.y } android.view.MotionEvent.ACTION_UP -> { if (kotlin.math.abs(ev.x - gTouchDownX) < 25f && kotlin.math.abs(ev.y - gTouchDownY) < 25f) gLastUserClickAt = android.os.SystemClock.uptimeMillis() } else -> {} } } } catch (_: Throwable) {}; if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ dispatchTouch") } catch (e: Exception) { LogUtil.error("tz2", e) }
+        try { val c = Class.forName("android.app.Activity", false, classLoader); module.hook(c.getDeclaredMethod("dispatchTouchEvent", android.view.MotionEvent::class.java)).setId("tz2").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> try { val ev = chain.getArg(0) as? android.view.MotionEvent; if (ev != null) { when (ev.actionMasked) { android.view.MotionEvent.ACTION_DOWN -> { gTouchDownX = ev.x; gTouchDownY = ev.y } android.view.MotionEvent.ACTION_UP -> { if (kotlin.math.abs(ev.x - gTouchDownX) < 25f && kotlin.math.abs(ev.y - gTouchDownY) < 25f) { gLastUserClickAt = android.os.SystemClock.uptimeMillis(); if (isLandscapeFullscreenActivity(gCurrentActivity)) armNativeControlsRetract() } } else -> {} } } } catch (_: Throwable) {}; if (gMasterOn && gTopZoneOn && handleTopZoneEvent(chain.getArg(0) as? android.view.MotionEvent)) true else chain.proceed() }); LogUtil.info("  ✓ dispatchTouch") } catch (e: Exception) { LogUtil.error("tz2", e) }
 
         // 应隐藏状态下 app 将目标UI设为可见时同步改回隐藏，消除切集闪现（与收藏/评论的零闪现机制对齐）
         try {
@@ -6209,7 +6233,6 @@ object Hooks {
             LogUtil.info("  ✓ NsVipImpl") } catch (e: Exception) { LogUtil.warn("  NsVipImpl 未找到: $e") }
 
         LogUtil.info("installBusinessHooks done"); LogUtil.diagDump(true)
-        startSideControlsWatchIfNeeded()
     }
 
     fun installDemoHooks(module: MainHook, classLoader: ClassLoader) {
