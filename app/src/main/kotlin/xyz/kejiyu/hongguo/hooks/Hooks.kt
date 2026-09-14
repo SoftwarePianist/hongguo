@@ -2037,6 +2037,52 @@ object Hooks {
         }
     }
 
+    /**
+     * 隐藏短剧 Holder 的全部控制层（含横屏全屏页左右两侧的锁屏 / 亮度 / 音量）。
+     *
+     * 与 [setOneShortVideoControlsVisible] 严格对称 —— 那条链路把控制层「显示」出来，
+     * 但**恢复播放时只隐藏了工具栏层**（gVideoToolbarLayers 里只有 ToolbarLayerFixed /
+     * CustomizeToolbarLayer，不含宿主自管的横屏侧边按钮），于是被「顺手」显示出来的
+     * 锁屏 / 亮度 / 音量再没有任何路径收回去 → 常驻不消失。
+     *
+     * 触发场景（2026-09-14 实测定位）：进横屏全屏页时宿主重建播放器会产生约 1ms 的
+     * 瞬时 pause→resume。因为用户刚点过「全屏观看」按钮，暂停恢复的 baseDelay 落在
+     * isUserClick 分支（=0）→ 当帧就执行 restoreAllControls()；而紧接着的 resume
+     * 分支只管工具栏层 → 三个按钮留在屏幕上。关闭「暂停后恢复所有控件」即恢复正常
+     * （已用 A/B 对照验证），确认是这条链路。
+     *
+     * 修法：对称调用同一个宿主入口 `sd(true, *)`，让宿主自己把所有控制层收回去 ——
+     * 不去逐个猜每个按钮归哪个管理器持有，行为与宿主自身一致。
+     */
+    private fun setOneShortVideoControlsHidden(holder: Any) {
+        if (gNames.shortControlsMethod.isBlank()) return
+        try {
+            holder.javaClass.getMethod(
+                gNames.shortControlsMethod,
+                Boolean::class.java,
+                Boolean::class.java,
+            ).invoke(holder, true, true)
+            LogUtil.incr("shortNativeControlsHide")
+        } catch (e: Throwable) {
+            LogUtil.warn("hide short-video controls failed: ${holder.javaClass.name}: $e")
+        }
+    }
+
+    private fun hideShortVideoNativeControls() {
+        if (!gMasterOn || !gControlOn) return
+        mainHandler.post {
+            if (!gMasterOn || !gControlOn || gVideoPaused || !shouldApplyUiHiding()) return@post
+            val holders = shortVideoHolderSnapshot().asReversed()
+            var handled = false
+            for ((holder, _) in holders) {
+                if (!isShortVideoHolderVisible(holder)) continue
+                setOneShortVideoControlsHidden(holder)
+                handled = true
+            }
+            if (!handled) holders.firstOrNull()?.first?.let { setOneShortVideoControlsHidden(it) }
+        }
+    }
+
     private fun restoreShortVideoNativeControls() {
         val holders = shortVideoHolderSnapshot().asReversed()
         var restoredVisibleHolder = false
@@ -2258,10 +2304,14 @@ object Hooks {
             gPauseRestoreRunnable = r
             mainHandler.postDelayed(r, baseDelay)
         } else {
+            val hadPauseRestore = gPauseRestoreRunnable != null
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
             gPauseRestoreRunnable = null
             restorePauseForcedViews()
             if (gPlayerOn) setVideoToolbarsVisible(false)
+            // 对称补偿：暂停恢复曾把控制层（含横屏侧边按钮）显示出来，而上面只隐藏了工具栏层。
+            // 仅在「本次暂停确实安排过恢复」时补隐藏，避免对普通 resume 产生多余扰动。
+            if (hadPauseRestore) hideShortVideoNativeControls()
             if (changed) {
                 LogUtil.info("video resumed: hide controls, reason=$reason")
                 if (first) {
