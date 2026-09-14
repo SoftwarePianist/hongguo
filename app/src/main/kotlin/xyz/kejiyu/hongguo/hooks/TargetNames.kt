@@ -328,16 +328,18 @@ object TargetNames {
             "top_header_constraint_layout",
             "bottom_container",
             "bottom_bar_container",
-            "short_series_catalog_view",
-            "more_operation_view",
-            "enter_episode_and_full_screen_container",
+            // 2026-09-15 移出隐藏域（功能入口，非装饰；理由见 Hooks.seriesIdNames 注释）：
+            //   short_series_catalog_view / more_operation_view / enter_episode_and_full_screen_container
+            // 藏掉「选集面板 / 清晰度倍速菜单 / 进集入口」= 同时废掉选集与自动切集。
         ),
         progressIdNames = listOf("seek_bar_root"),
 
-        staticHideIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07, 0x7F0B05A6, 0x7F0B0597, 0x7F0B2983, 0x7F0B1FA3, 0x7F0B0FAE),
+        // 2026-09-15 移出功能入口（非装饰；同 0a0be638）：0x7F0B2983 short_series_catalog_view、
+        // 0x7F0B1FA3 more_operation_view、0x7F0B0FAE enter_episode_and_full_screen_container
+        staticHideIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07, 0x7F0B05A6, 0x7F0B0597),
         staticProgressIds = listOf(0x7F0B2877),
 
-        pauseRestoreIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07, 0x7F0B05A6, 0x7F0B0597, 0x7F0B2983, 0x7F0B1FA3, 0x7F0B0FAE),
+        pauseRestoreIds = listOf(0x7F0B2615, 0x7F0B1E9C, 0x7F0B28FA, 0x7F0B2F07, 0x7F0B05A6, 0x7F0B0597),
     )
 
     internal val OVERSEA_73532 = Names(
@@ -395,20 +397,23 @@ object TargetNames {
             "top_header_constraint_layout",
             "bottom_container",
             "bottom_bar_container",
-            "short_series_catalog_view",
-            "more_operation_view",
-            "enter_episode_and_full_screen_container",
+            // 2026-09-15 移出隐藏域（功能入口，非装饰；理由见 Hooks.seriesIdNames 注释）：
+            //   short_series_catalog_view / more_operation_view / enter_episode_and_full_screen_container
+            // 藏掉「选集面板 / 清晰度倍速菜单 / 进集入口」= 同时废掉选集与自动切集。
         ),
         progressIdNames = listOf("seek_bar_root"),
 
-        staticHideIds = listOf(0x7F0B26A1, 0x7F0B1F00, 0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598, 0x7F0B2A26, 0x7F0B2007, 0x7F0B0FCD),
+        // 2026-09-15 移出功能入口（非装饰；同 0a0be638）：0x7F0B2A26 short_series_catalog_view、
+        // 0x7F0B2007 more_operation_view、0x7F0B0FCD enter_episode_and_full_screen_container、
+        // 0x7F0B0FCE enter_episode_btn
+        staticHideIds = listOf(0x7F0B26A1, 0x7F0B1F00, 0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598),
         staticProgressIds = listOf(0x7F0B290E),
 
-        pauseRestoreIds = listOf(0x7F0B26A1, 0x7F0B1F00, 0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598, 0x7F0B2A26, 0x7F0B2007, 0x7F0B0FCD),
+        pauseRestoreIds = listOf(0x7F0B26A1, 0x7F0B1F00, 0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598),
 
         seriesStaticIds = listOf(
-            0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598, 0x7F0B2A26, 0x7F0B2007,
-            0x7F0B0FCD, 0x7F0B0FCE, 0x7F0B26A1, 0x7F0B1F00,
+            0x7F0B2998, 0x7F0B2FB6, 0x7F0B05A7, 0x7F0B0598,
+            0x7F0B26A1, 0x7F0B1F00,
             0x7F0B1A24, 0x7F0B1A26, 0x7F0B2EF6, 0x7F0B2F01, 0x7F0B0BCF,
         ),
     )
@@ -525,21 +530,29 @@ object TargetNames {
             "top_header_constraint_layout",
             "bottom_container",
             "bottom_bar_container",
-            "short_series_catalog_view",
-            "more_operation_view",
-            "enter_episode_and_full_screen_container",
+            // 2026-09-15 移出隐藏域（功能入口，非装饰；理由见 Hooks.seriesIdNames 注释）：
+            //   short_series_catalog_view / more_operation_view / enter_episode_and_full_screen_container
+            // 藏掉「选集面板 / 清晰度倍速菜单 / 进集入口」= 同时废掉选集与自动切集。
         ),
         progressIdNames = listOf("seek_bar_root"),
 
         // 下表 ID 取自 7.3.7.32 真机运行时按名解析结果（旧表硬编码值在本版本已整体错位
         // +10~+58）。名称解析仍是主路径，此处仅作为视图树尚未建立时的预置兜底。
-        staticHideIds = listOf(0x7F0B26D5, 0x7F0B1F28, 0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2, 0x7F0B2A5C, 0x7F0B2030, 0x7F0B0FFA),
+        // 2026-09-15 移出隐藏域（功能入口，非装饰）：0x7F0B2A5C short_series_catalog_view（选集面板）、
+        // 0x7F0B2030 more_operation_view（清晰度/倍速菜单）、0x7F0B0FFA enter_episode_and_full_screen_container。
+        // 这三个是「隐藏控件」开关的越界项（其职责只是顶部/底部导航、作品信息、右侧互动）。
+        staticHideIds = listOf(0x7F0B26D5, 0x7F0B1F28, 0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2),
         staticProgressIds = listOf(0x7F0B2943),
 
-        pauseRestoreIds = listOf(0x7F0B26D5, 0x7F0B1F28, 0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2, 0x7F0B2A5C, 0x7F0B2030, 0x7F0B0FFA),
+        // 暂停恢复域同步收窄：选集面板不再被隐藏，自然无需在暂停时「恢复」它。
+        pauseRestoreIds = listOf(0x7F0B26D5, 0x7F0B1F28, 0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2),
 
+        // 2026-09-15 再移出四项功能入口（选集面板/清晰度菜单/观看全集/进集容器）。
+        // 「选集相关功能」开关的正解是 hideSeriesToolbarView 的几何判定（seriesToolbarKind，
+        // 顶部 9 子项 40~48dp、底部 3 子项 36~44dp 的纯装饰条），ID 表只是冗余兜底；
+        // 兜底里混进功能入口 ⇒ 开关一开就把选集与自动切集一起废掉。
         seriesStaticIds = listOf(
-            0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2, 0x7F0B2A5C, 0x7F0B2030, 0x7F0B0FFA, 0x7F0B0FFB,
+            0x7F0B29CE, 0x7F0B2FF0, 0x7F0B05B1, 0x7F0B05A2,
             0x7F0B26D5, 0x7F0B1F28, 0x7F0B04B0, 0x7F0B1A52, 0x7F0B1A54, 0x7F0B0BDE, 0x7F0B2F3B, 0x7F0B2F30,
         ),
 

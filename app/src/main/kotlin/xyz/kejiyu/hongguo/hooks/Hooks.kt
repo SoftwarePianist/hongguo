@@ -271,16 +271,27 @@ object Hooks {
 
     private val seriesIdNames = listOf(
         "series_info_panel_container", "top_header_constraint_layout",
-        "bottom_container", "bottom_bar_container", "short_series_catalog_view", "more_operation_view",
-        "enter_episode_and_full_screen_container", "enter_episode_btn",
+        "bottom_container", "bottom_bar_container",
         "iu1", "hs9", "book_container", "is7",
         "kmp_compose_all_container", "kmp_compose_view", "compose_title",
         "title_bar_panel", "title_bar_container",
+        // 2026-09-15 移出隐藏域（**功能入口，不是装饰**）：
+        //   short_series_catalog_view        ——「选集 · 已完结 · 全N集」面板，选集/自动连播的载体
+        //   more_operation_view              ——「清晰度 / 倍速 / 清屏 / 还原」功能菜单
+        //   enter_episode_btn                ——「观看全集」按钮
+        //   enter_episode_and_full_screen_container —— 进集/全屏入口容器
+        // 隐藏这四项的代价是「选集 UI 消失 + 自动切集失效」，而收益仅是去掉一处可点控件
+        // ⇒ 收益负值。这正是「模块不该藏宿主的功能入口、只该藏冗余装饰」的同一条原则。
+        // 说明：本开关的正当作用范围见 addSwitch("选集相关功能", "隐藏联播页顶部和底部的选集相关控件")，
+        // 真机由 hideSeriesToolbarView 的几何判定（seriesToolbarKind）承担，ID 表只是兜底。
     )
+    // 2026-09-15 移出功能入口（0x7F0B2983 short_series_catalog_view / 0x7F0B1FA3 more_operation_view /
+    // 0x7F0B0FAE enter_episode_and_full_screen_container / 0x7F0B0FAF enter_episode_btn）：
+    // 此表是未配置 seriesStaticIds 的版本块的兜底（含 OVERSEA_73132、CN_73232、CN_73318），
+    // 兜底里混进功能入口 = 开关一开就废掉选集与自动切集（同 0a0be638 根因）。
     private val staticSeriesIds = setOf(
         0x7F0B28FA, 0x7F0B2F07,
-        0x7F0B05A6, 0x7F0B0597, 0x7F0B2983, 0x7F0B1FA3,
-        0x7F0B0FAE, 0x7F0B0FAF,
+        0x7F0B05A6, 0x7F0B0597,
         0x7F1133AE, 0x7F112E0D,
         0x7F0B19E4, 0x7F0B19E6, 0x7F0B0BB5,
         0x7F0B2E54, 0x7F0B2E49,
