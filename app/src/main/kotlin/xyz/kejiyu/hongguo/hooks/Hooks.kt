@@ -2109,6 +2109,71 @@ object Hooks {
         mainHandler.postDelayed(r, 4000L)
     }
 
+    // ── 侧边控件（锁屏 / 亮度 / 音量）的低频自愈看护 ────────────────────────────
+    // 为什么需要：模块此前只有「pause → resume」这一个收回触发点，但**宿主自己**也会显示
+    // 控制层 —— 用户点一下屏幕空白处，宿主就把控制层显示出来。而宿主的自动隐藏计时器在这个
+    // 状态下并不可靠。2026-09-14 实测（ebb811b）：
+    //   18:26:23.956 播放 → 模块在 resume 分支收回成功（像素 0.00）
+    //   18:26:26.674 用户点空白处 → 三按钮重新出现，此后**模块日志一行都没有**
+    //   18:29:0x     已过 3 分钟仍可见（像素 1.39/1.20/1.24）；再点一次空白处才收回
+    // 即：这类残留模块全程无动作，只能靠用户再点一次 —— 与「控件该自己消失」的预期不符。
+    // 做法：不再依赖任何单次事件（历史教训：一次性 post 会被状态翻转吞掉；按 12s 窗口也会漏掉
+    // 宿主发起的显示），改成周期性核对**视图地真**：横屏全屏页 + 播放态 + 用户静默 + 侧边按钮
+    // 仍可见 → 补收。节奏与宿主自身对工具栏的自动隐藏一致（实测宿主 4~9s）。
+    @Volatile private var gSideWatchRunning = false
+    private val gSideWatchIntervalMs = 1000L
+    private val gSideWatchIdleMs = 3000L
+
+    // ID 用**名称**解析：资源 ID 是 aapt 生成的，每次发版整体漂移，名称才稳定。
+    private val nativeSideControlNames = arrayOf(
+        "full_screen_lock_view",
+        "full_screen_brightness_control",
+        "full_screen_volume_control",
+    )
+
+    /** 三个侧边按钮里只要有一个可见，就说明宿主控制层没收回去。 */
+    private fun nativeSideControlsVisible(): Boolean {
+        val act = gCurrentActivity ?: return false
+        return try {
+            for (name in nativeSideControlNames) {
+                val id = act.resources.getIdentifier(name, "id", gPkg)
+                if (id == 0) continue
+                val v = act.findViewById<View>(id) ?: continue
+                if (v.visibility == View.VISIBLE && v.alpha > 0.01f) return true
+            }
+            false
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun startSideControlsWatchIfNeeded() {
+        if (gSideWatchRunning) return
+        gSideWatchRunning = true
+        val r = object : Runnable {
+            override fun run() {
+                try {
+                    sideControlsWatchTick()
+                } catch (_: Throwable) {
+                }
+                mainHandler.postDelayed(this, gSideWatchIntervalMs)
+            }
+        }
+        mainHandler.postDelayed(r, gSideWatchIntervalMs)
+    }
+
+    private fun sideControlsWatchTick() {
+        if (!gMasterOn) return
+        val act = gCurrentActivity ?: return
+        if (!isLandscapeFullscreenActivity(act)) return
+        if (!nativeSideControlsVisible()) return
+        // 暂停态控件本就该显示；用户正在操作时不抢。
+        if (gVideoPaused) return
+        if (android.os.SystemClock.uptimeMillis() - gLastUserClickAt < gSideWatchIdleMs) return
+        LogUtil.info("side controls idle retract: hide native controls")
+        hideShortVideoNativeControls()
+    }
+
     private fun tryHideShortVideoNativeControls(force: Boolean = false) {
         if (!gMasterOn) {
             gNativeControlsHidePending = false
@@ -6144,6 +6209,7 @@ object Hooks {
             LogUtil.info("  ✓ NsVipImpl") } catch (e: Exception) { LogUtil.warn("  NsVipImpl 未找到: $e") }
 
         LogUtil.info("installBusinessHooks done"); LogUtil.diagDump(true)
+        startSideControlsWatchIfNeeded()
     }
 
     fun installDemoHooks(module: MainHook, classLoader: ClassLoader) {
