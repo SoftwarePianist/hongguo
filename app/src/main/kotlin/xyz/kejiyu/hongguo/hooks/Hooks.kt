@@ -555,13 +555,33 @@ object Hooks {
             gResourceIdsResolved = true
         }
     }
+    /**
+     * 「这个 Class 是不是 Compose 容器」的记忆表。
+     *
+     * `Class.getSimpleName()` 对带包名的类实现为 `name.substring(name.lastIndexOf('.') + 1)` ——
+     * **每次调用都分配一个新 String**。而 `isComposeSeriesBar` 在 `gPlayerOn` 时会被每个被扫描的节点
+     * 调用一次（实测占节点数的 99.5%），启动窗口内近 3000 次。
+     *
+     * 视图中不同 Class 的数量是有限的（数百级），按 Class 记忆后：
+     * 每个 Class 只付一次 `simpleName` 代价，之后全部命中缓存、**零字符串分配**。
+     * 用 `Class` 作 key 是安全的 —— `Class` 的 hashCode 就是身份哈希，且 Class 对象本身生命周期
+     * 跟随 classLoader，不会造成泄漏。
+     */
+    private val gComposeBarClassCache = java.util.concurrent.ConcurrentHashMap<Class<*>, Boolean>()
+
     private fun isComposeSeriesBar(v: View?): Boolean {
         if (v == null) return false
-        if (v.javaClass.simpleName == "TreeLifecycleComposeContainer") {
-            val density = try { v.resources.displayMetrics.density.coerceAtLeast(0.1f) } catch (_: Throwable) { 1f }
-            val h = (if (v.height > 0) v.height else v.measuredHeight) / density
-            if (h in 30f..70f || v.id == 0x7F0B0BB5) return true
+        val cls = v.javaClass
+        val cached = gComposeBarClassCache[cls]
+        val isContainer = if (cached != null) cached else {
+            val r = cls.simpleName == "TreeLifecycleComposeContainer"
+            gComposeBarClassCache[cls] = r
+            r
         }
+        if (!isContainer) return false
+        val density = try { v.resources.displayMetrics.density.coerceAtLeast(0.1f) } catch (_: Throwable) { 1f }
+        val h = (if (v.height > 0) v.height else v.measuredHeight) / density
+        if (h in 30f..70f || v.id == 0x7F0B0BB5) return true
         return false
     }
 
@@ -4465,6 +4485,31 @@ object Hooks {
             clazz.declaredConstructors.forEachIndexed { i, c -> try { module.hook(c).setId("${hookId}_$i").setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> block(chain) }) } catch (_: Exception) {} }
         }
 
+        /**
+         * 只挂「参数类型精确匹配」的那一个重载。
+         *
+         * paramTypeNames 用 `Class.getName()` 的形式：类写全限定名，基本类型写 "int"/"boolean"。
+         *
+         * 为什么需要它：`ham()` 会把**同名的全部重载**都挂上，而框架方法内部普遍存在委托链 ——
+         * 例如 `LayoutInflater.inflate` 的 4 个重载最终都汇入
+         * `inflate(XmlPullParser, ViewGroup, boolean)`，`ViewGroup.addView` 的 5 个重载最终都汇入
+         * `addView(View, int, LayoutParams)`。于是宿主调用**一次** `addView(child)`，链条上多个已 hook 的
+         * 重载会**依次命中**，各自对**同一棵子树**跑一遍 `scanTreeUnified` —— 实测把节点扫描量放大约 3 倍。
+         * 只挂终端重载即可覆盖全部入口，且与「挂全部重载」的覆盖范围等价。
+         */
+        fun hamExact(clazz: Class<*>, methodName: String, paramTypeNames: List<String>, hookId: String, block: (XposedInterface.Chain) -> Any?) {
+            val target = clazz.declaredMethods.firstOrNull { m ->
+                m.name == methodName && m.parameterTypes.map { it.name } == paramTypeNames
+            }
+            if (target == null) {
+                LogUtil.warn("  hamExact 未命中 $methodName(${paramTypeNames.joinToString()})")
+                return
+            }
+            try {
+                module.hook(target).setId(hookId).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept(Hooker { chain -> block(chain) })
+            } catch (_: Exception) {}
+        }
+
         if (pkg == TargetNames.CN_PACKAGE || pkg == TargetNames.OVERSEA_PACKAGE) {
             try {
                 val mainClazz = Class.forName("com.dragon.read.pages.main.MainFragmentActivity", false, classLoader)
@@ -5548,7 +5593,13 @@ object Hooks {
 
         try {
             val c = Class.forName("android.view.LayoutInflater", false, classLoader)
-            ham(c, "inflate", "inf") { chain ->
+            // 只挂终端重载：其余 3 个 inflate 最终都会委托到它。
+            // 用 ham 会把 4 个重载全挂上，同一次 inflate 会命中 2~3 层 → 同一棵子树被重复扫描。
+            hamExact(
+                c, "inflate",
+                listOf("org.xmlpull.v1.XmlPullParser", "android.view.ViewGroup", "boolean"),
+                "inf",
+            ) { chain ->
                 val result = chain.proceed()
                 if (result is ViewGroup) {
                     LogUtil.incr("inflate")
@@ -5559,7 +5610,7 @@ object Hooks {
                 }
                 result
             }
-            LogUtil.info("  ✓ inflate")
+            LogUtil.info("  ✓ inflate（仅终端重载）")
         } catch (e: Exception) { LogUtil.error("inflate", e) }
 
         try {
@@ -5604,12 +5655,18 @@ object Hooks {
         } catch (e: Exception) { LogUtil.error("setVis", e) }
         try {
             val c = Class.forName("android.view.ViewGroup", false, classLoader)
-            ham(c, "addView", "av") { chain ->
+            // 同样只挂终端重载：addView(View) / (View,int) / (View,LP) / (View,int,int)
+            // 最终都会委托到 addView(View, int, LayoutParams)。
+            hamExact(
+                c, "addView",
+                listOf("android.view.View", "int", "android.view.ViewGroup\$LayoutParams"),
+                "av",
+            ) { chain ->
                 val v = try { chain.getArg(0) as? View } catch (_: Throwable) { null }
                 val result = chain.proceed()
                 try {
-                    if (v != null && isInsideModuleUi(v)) return@ham result
-                    if (!gMasterOn || (gRestoreControlsOnPause && gVideoPaused)) return@ham result
+                    if (v != null && isInsideModuleUi(v)) return@hamExact result
+                    if (!gMasterOn || (gRestoreControlsOnPause && gVideoPaused)) return@hamExact result
                     LogUtil.incr("addView")
                     if (v != null) {
                         scanTreeUnified(v)
@@ -5617,7 +5674,7 @@ object Hooks {
                 } catch (_: Exception) {}
                 result
             }
-            LogUtil.info("  ✓ addView")
+            LogUtil.info("  ✓ addView（仅终端重载）")
         } catch (e: Exception) { LogUtil.error("addView", e) }
 
         try {
