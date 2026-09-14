@@ -2055,7 +2055,10 @@ object Hooks {
      * 不去逐个猜每个按钮归哪个管理器持有，行为与宿主自身一致。
      */
     private fun setOneShortVideoControlsHidden(holder: Any) {
-        if (gNames.shortControlsMethod.isBlank()) return
+        if (gNames.shortControlsMethod.isBlank()) {
+            LogUtil.warn("hide short-video native controls: shortControlsMethod 为空，跳过")
+            return
+        }
         try {
             holder.javaClass.getMethod(
                 gNames.shortControlsMethod,
@@ -2064,23 +2067,71 @@ object Hooks {
             ).invoke(holder, true, true)
             LogUtil.incr("shortNativeControlsHide")
         } catch (e: Throwable) {
-            LogUtil.warn("hide short-video controls failed: ${holder.javaClass.name}: $e")
+            LogUtil.warn("hide short-video native controls failed: ${holder.javaClass.name}: $e")
         }
     }
 
-    private fun hideShortVideoNativeControls() {
-        if (!gMasterOn || !gControlOn) return
-        mainHandler.post {
-            if (!gMasterOn || !gControlOn || gVideoPaused || !shouldApplyUiHiding()) return@post
-            val holders = shortVideoHolderSnapshot().asReversed()
-            var handled = false
-            for ((holder, _) in holders) {
-                if (!isShortVideoHolderVisible(holder)) continue
-                setOneShortVideoControlsHidden(holder)
-                handled = true
+    // 「暂停恢复」会把宿主控制层（含横屏侧边按钮）显示出来，而宿主**不会**替模块收回
+    // （程序化显示不会启动宿主自身的自动隐藏计时器）—— 必须由模块自己补收。
+    // 但**不能用一次性的 post**：进全屏 / 切集会在几十毫秒内再翻转一次 paused，
+    // 单次 post 执行时被守卫拦下后就**永久丢失**（历史现象：恢复播放后侧边按钮仍常驻）。
+    // 故用 pending 标记跨暂停保留，直到在「播放态」真正收回成功为止。
+    private var gNativeControlsHidePending = false
+
+    private fun hideShortVideoNativeControls(force: Boolean = false) {
+        if (!gMasterOn) return
+        gNativeControlsHidePending = true
+        mainHandler.post { tryHideShortVideoNativeControls(force) }
+    }
+
+    // 「暂停恢复」的补收计时器。宿主只会为**用户真实点击**触发的显示启动自动隐藏计时器；
+    // 模块用 sd(false,true) 程序化显示的控制层宿主不会计时 → 若这次暂停是进全屏 / 切集
+    // 产生的瞬时 pause（非用户点击），侧边按钮就会永久残留（实测 50s+ 不消失）。
+    // 故模块自己补一个与宿主一致的「静默 4s 后收回」。
+    private var gPauseRestoreRetractRunnable: Runnable? = null
+
+    private fun schedulePauseRestoreRetract() {
+        gPauseRestoreRetractRunnable?.let { mainHandler.removeCallbacks(it) }
+        val r = object : Runnable {
+            override fun run() {
+                gPauseRestoreRetractRunnable = null
+                if (!gMasterOn || !gRestoreControlsOnPause || !gVideoPaused) return
+                // 用户正在操作（拖进度条 / 点按钮）→ 不抢控件，等静默后再收。
+                if (android.os.SystemClock.uptimeMillis() - gLastUserClickAt < 2500L) {
+                    schedulePauseRestoreRetract()
+                    return
+                }
+                LogUtil.info("pause restore auto-retract: hide native controls")
+                hideShortVideoNativeControls(force = true)
             }
-            if (!handled) holders.firstOrNull()?.first?.let { setOneShortVideoControlsHidden(it) }
         }
+        gPauseRestoreRetractRunnable = r
+        mainHandler.postDelayed(r, 4000L)
+    }
+
+    private fun tryHideShortVideoNativeControls(force: Boolean = false) {
+        if (!gMasterOn) {
+            gNativeControlsHidePending = false
+            return
+        }
+        val snap = shortVideoHolderSnapshot()
+        // 门禁必须与「显示侧」严格对称 —— 这是本 bug 的核心。
+        // 显示链路 restoreAllControls() → restoreShortVideoNativeControls() → sd(false,true)
+        // **没有任何门禁**（不查 gControlOn / gPlayerOn / shouldApplyUiHiding）。
+        // 隐藏侧若额外加门，就会出现「显示侧放行、隐藏侧被拦」→ 控件常驻。
+        // 因此只保留总开关 + 「当前不是暂停态」（暂停时控件本就该显示；force 用于暂停态补收）。
+        if (gVideoPaused && !force) {
+            // 又回到暂停态：保留 pending，等下一次 resume 再补收（绝不丢）。
+            return
+        }
+        var handled = false
+        for ((holder, _) in snap.asReversed()) {
+            if (!isShortVideoHolderVisible(holder)) continue
+            setOneShortVideoControlsHidden(holder)
+            handled = true
+        }
+        if (!handled) snap.firstOrNull()?.first?.let { setOneShortVideoControlsHidden(it) }
+        gNativeControlsHidePending = false
     }
 
     private fun restoreShortVideoNativeControls() {
@@ -2264,6 +2315,8 @@ object Hooks {
             if (!changed) return
             gPauseStartedAt = android.os.SystemClock.uptimeMillis()
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
+            gPauseRestoreRetractRunnable?.let { mainHandler.removeCallbacks(it) }
+            gPauseRestoreRetractRunnable = null
             val isCompletedPause = reason.contains("completed")
             val isUserClick = android.os.SystemClock.uptimeMillis() - gLastUserClickAt < 800L
             val baseDelay = when {
@@ -2299,6 +2352,11 @@ object Hooks {
                             mainHandler.post { scanAllWindows() }
                         }
                     }, 2500L)
+
+                    // 「暂停恢复」显示的是模块**程序化**调起的控制层，宿主不会为它启动自动隐藏
+                    // 计时器（只有真实点击才会）→ 非点击场景下侧边按钮会永久残留（实测 50s+）。
+                    // 故模块自己补一个与宿主一致的「静默 4s 后收回」；用户正在操作时自动让路。
+                    schedulePauseRestoreRetract()
                 }
             }
             gPauseRestoreRunnable = r
@@ -2307,11 +2365,14 @@ object Hooks {
             val hadPauseRestore = gPauseRestoreRunnable != null
             gPauseRestoreRunnable?.let { mainHandler.removeCallbacks(it) }
             gPauseRestoreRunnable = null
+            gPauseRestoreRetractRunnable?.let { mainHandler.removeCallbacks(it) }
+            gPauseRestoreRetractRunnable = null
             restorePauseForcedViews()
             if (gPlayerOn) setVideoToolbarsVisible(false)
             // 对称补偿：暂停恢复曾把控制层（含横屏侧边按钮）显示出来，而上面只隐藏了工具栏层。
-            // 仅在「本次暂停确实安排过恢复」时补隐藏，避免对普通 resume 产生多余扰动。
-            if (hadPauseRestore) hideShortVideoNativeControls()
+            // hadPauseRestore：本次暂停确实安排过恢复 → 需要补收；
+            // pending：上一次补收被瞬时 pause 拦下未完成 → 借这次 resume 重试，避免永久丢失。
+            if (hadPauseRestore || gNativeControlsHidePending) hideShortVideoNativeControls()
             if (changed) {
                 LogUtil.info("video resumed: hide controls, reason=$reason")
                 if (first) {
