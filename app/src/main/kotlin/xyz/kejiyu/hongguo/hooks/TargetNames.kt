@@ -60,6 +60,7 @@ object TargetNames {
         val resolutionEngineField: String,
 
         val resolutionApplyMethod: String = "",
+        val resolutionUserSelectField: String = "",
 
         val doubleTapHandlers: List<String>,
         val rightViewAgency: String,
@@ -512,6 +513,7 @@ object TargetNames {
         resolutionModelMethods = listOf("M", "O", "P"),
         resolutionEngineField = "",
         resolutionApplyMethod = "S",
+        resolutionUserSelectField = "c",
 
         // 旧表 fullscreen.f$d / d$d 已不再实现 onDoubleTap；该版本为 fullscreen.i$d。
         doubleTapHandlers = listOf("com.dragon.read.component.shortvideo.impl.fullscreen.i\$d"),

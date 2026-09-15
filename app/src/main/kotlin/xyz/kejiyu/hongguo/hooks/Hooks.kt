@@ -40,7 +40,6 @@ object Hooks {
     private var gMasterOn = false
     private var gStatusOn = false
     private var gControlOn = false
-    private var gPlayerOn = false
     private var gAdOn = false
     private var gRefreshOff = false
     private var gTopZoneOn = false
@@ -265,7 +264,6 @@ object Hooks {
     }
 
     private val gTargetIdSet = mutableSetOf<Int>()
-    private val gSeriesTargetIdSet = mutableSetOf<Int>()
     private val gProgressIdSet = mutableSetOf<Int>()
     private val gPauseRestoreIdSet = mutableSetOf<Int>()
 
@@ -282,8 +280,8 @@ object Hooks {
         //   enter_episode_and_full_screen_container —— 进集/全屏入口容器
         // 隐藏这四项的代价是「选集 UI 消失 + 自动切集失效」，而收益仅是去掉一处可点控件
         // ⇒ 收益负值。这正是「模块不该藏宿主的功能入口、只该藏冗余装饰」的同一条原则。
-        // 说明：本开关的正当作用范围见 addSwitch("选集相关功能", "隐藏联播页顶部和底部的选集相关控件")，
-        // 真机由 hideSeriesToolbarView 的几何判定（seriesToolbarKind）承担，ID 表只是兜底。
+        // 说明：已合并入「隐藏控件」开关（control_hide），真机由 hideSeriesToolbarView 的几何判定
+        //（seriesToolbarKind）承担，ID 表只是兜底。
     )
     // 2026-09-15 移出功能入口（0x7F0B2983 short_series_catalog_view / 0x7F0B1FA3 more_operation_view /
     // 0x7F0B0FAE enter_episode_and_full_screen_container / 0x7F0B0FAF enter_episode_btn）：
@@ -354,8 +352,8 @@ object Hooks {
 
             gMasterOn = gPrefs!!.getBoolean("master_on", false)
             gStatusOn = gPrefs!!.getBoolean("status_bar", false)
-            gControlOn = gPrefs!!.getBoolean("control_hide", false)
-            gPlayerOn = gPrefs!!.getBoolean("player_bar", false)
+            val legacyPlayerBar = gPrefs!!.getBoolean("player_bar", false)
+            gControlOn = gPrefs!!.getBoolean("control_hide", legacyPlayerBar)
             gAdOn = gPrefs!!.getBoolean("ad_block", false)
             gRefreshOff = gPrefs!!.getBoolean("pull_refresh", false)
             gTopZoneOn = gPrefs!!.getBoolean("top_zone", false)
@@ -592,7 +590,7 @@ object Hooks {
         synchronized(gTargetIdSet) {
             if (gResourceIdsResolved) return
             gNames.hideIdNames.forEach { resolveEntryId(it, root) }
-            seriesIdNames.forEach { resolveEntryId(it, root, gSeriesTargetIdSet, "选集资源") }
+            seriesIdNames.forEach { resolveEntryId(it, root, gTargetIdSet, "选集资源") }
             gNames.progressIdNames.forEach { resolveEntryId(it, root, gProgressIdSet, "进度条资源") }
             resolvePauseRestoreIds(root)
             gResourceIdsResolved = true
@@ -602,7 +600,7 @@ object Hooks {
      * 「这个 Class 是不是 Compose 容器」的记忆表。
      *
      * `Class.getSimpleName()` 对带包名的类实现为 `name.substring(name.lastIndexOf('.') + 1)` ——
-     * **每次调用都分配一个新 String**。而 `isComposeSeriesBar` 在 `gPlayerOn` 时会被每个被扫描的节点
+     * **每次调用都分配一个新 String**。而 `isComposeSeriesBar` 在 `gControlOn` 时会被每个被扫描的节点
      * 调用一次（实测占节点数的 99.5%），启动窗口内近 3000 次。
      *
      * 视图中不同 Class 的数量是有限的（数百级），按 Class 记忆后：
@@ -635,11 +633,10 @@ object Hooks {
             val id = v.id
             if (id > 0) {
                 if (gControlOn && gTargetIdSet.contains(id)) { LogUtil.incr("matchHit"); return true }
-                if (gPlayerOn && gSeriesTargetIdSet.contains(id)) { LogUtil.incr("matchHit"); return true }
             }
         } catch (_: Exception) {}
-        if (gPlayerOn && isComposeSeriesBar(v)) { LogUtil.incr("matchHit"); return true }
         if (gControlOn) {
+            if (isComposeSeriesBar(v)) { LogUtil.incr("matchHit"); return true }
             if (gHideClassesSet.isNotEmpty()) {
                 try { if (v.javaClass.name in gHideClassesSet) { LogUtil.incr("matchHit"); return true } } catch (_: Exception) {}
             }
@@ -1389,7 +1386,7 @@ object Hooks {
         }
         try {
             v.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-                if (!shouldApplyUiHiding() || !gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) return@addOnLayoutChangeListener
+                if (!shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return@addOnLayoutChangeListener
                 val kind = seriesToolbarKind(view)
                 if (kind != 0) rememberSeriesToolbar(view, kind)
                 if (kind != 0 && view.visibility == View.VISIBLE) {
@@ -1467,7 +1464,7 @@ object Hooks {
     }
 
     private fun hideSeriesToolbarView(v: View?) {
-        if (v == null || !shouldApplyUiHiding() || !gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         val kind = seriesToolbarKind(v)
         if (kind == 0) return
         rememberSeriesToolbar(v, kind)
@@ -1481,7 +1478,7 @@ object Hooks {
     }
 
     private fun scanTreePlayer(v: View?) {
-        if (v == null || !gMasterOn || !gPlayerOn || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         if (seriesToolbarKind(v) != 0) { hideSeriesToolbarView(v); return }
         if (v is ViewGroup) for (i in 0 until v.childCount) scanTreePlayer(v.getChildAt(i))
     }
@@ -1520,7 +1517,7 @@ object Hooks {
     }
 
     private fun blindView(v: View?) {
-        if (v == null || !shouldApplyUiHiding() || !gMasterOn || (!gControlOn && !gPlayerOn) || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !shouldApplyUiHiding() || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         try {
 
             if (v.visibility != View.VISIBLE) return
@@ -1590,7 +1587,6 @@ object Hooks {
 
     private fun shouldRestoreOnPause(id: Int): Boolean {
         if (gControlOn && gTargetIdSet.contains(id)) return true
-        if (gPlayerOn && gSeriesTargetIdSet.contains(id)) return true
         if (gProgressOff && gProgressIdSet.contains(id)) return true
         return false
     }
@@ -1662,13 +1658,10 @@ object Hooks {
             if (!isInsideModuleUi(root)) scanTreePauseRestore(root)
         }
 
-        if (gPlayerOn) {
+        if (gControlOn) {
             for ((toolbar, _) in knownSeriesToolbarSnapshot()) {
                 if (isInsideCurrentActivityDecor(toolbar)) forceOnePauseRestoreView(toolbar)
             }
-        }
-
-        if (gControlOn) {
             for (agency in rightViewAgencySnapshot()) {
                 try {
                     forcePauseRightAgencyTree(agency)
@@ -1703,7 +1696,7 @@ object Hooks {
         return false
     }
     private fun scanTreeQuick(v: View?) {
-        if (v == null || !gMasterOn || (!gControlOn && !gPlayerOn) || (gRestoreControlsOnPause && gVideoPaused)) return
+        if (v == null || !gMasterOn || !gControlOn || (gRestoreControlsOnPause && gVideoPaused)) return
         if (isInsideModuleUi(v)) return
         LogUtil.incr("scanTree")
 
@@ -2155,8 +2148,8 @@ object Hooks {
 
         val masterActive = shouldApplyUiHiding() && gMasterOn && !(gRestoreControlsOnPause && gVideoPaused)
         if (masterActive) {
-            if ((gControlOn || gPlayerOn) && quickMatch(v)) { blindView(v); return }
-            if (gPlayerOn && seriesToolbarKind(v) != 0) { hideSeriesToolbarView(v); return }
+            if (gControlOn && quickMatch(v)) { blindView(v); return }
+            if (gControlOn && seriesToolbarKind(v) != 0) { hideSeriesToolbarView(v); return }
             if (gProgressOff && isProgressBar(v)) {
                 if (v.visibility == View.VISIBLE) {
                     rememberViewState(v)
@@ -2754,11 +2747,67 @@ object Hooks {
         }
     }
 
+    /** isUserSelect 字段按控制器类缓存（见 [resolveResolutionUserSelectField]）。 */
+    private val gResolutionUserSelectFieldCache = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<Class<*>, java.lang.reflect.Field>()
+    )
+
+    /** 「名字表里的 isUserSelect 字段未命中」只告警一次。 */
+    @Volatile private var gResolutionUserSelectMissWarned = false
+
+    private fun resolveResolutionUserSelectField(controller: Any): java.lang.reflect.Field? {
+        gResolutionUserSelectFieldCache[controller.javaClass]?.let { return it }
+        val resolved = lookupResolutionUserSelectField(controller)
+        if (resolved != null) gResolutionUserSelectFieldCache[controller.javaClass] = resolved
+        return resolved
+    }
+
+    private fun lookupResolutionUserSelectField(controller: Any): java.lang.reflect.Field? {
+        val configured = gNames.resolutionUserSelectField
+        if (configured.isNotBlank()) {
+            var clazz: Class<*>? = controller.javaClass
+            while (clazz != null) {
+                try {
+                    val field = clazz.getDeclaredField(configured)
+                    if (field.type == java.lang.Boolean.TYPE) {
+                        return field.apply { isAccessible = true }
+                    }
+                } catch (_: NoSuchFieldException) {}
+                clazz = clazz.superclass
+            }
+            if (!gResolutionUserSelectMissWarned) {
+                gResolutionUserSelectMissWarned = true
+                LogUtil.warn("最高画质：配置的 isUserSelect 字段 $configured 未命中")
+            }
+        }
+        return null
+    }
+
+    /**
+     * 将控制器内部的 isUserSelect 标记抹回 false。
+     * 宿主原生切画质入口内部会无条件置 isUserSelect=true，导致引擎下发码率回调
+     * (onVideoStreamBitrateChanged) 时误以为是用户手动在菜单挑选，从而弹出「清晰度已切换到1080P」浮层。
+     */
+    private fun suppressAutoResolutionPrompt(controller: Any?) {
+        if (controller == null) return
+        try {
+            val field = resolveResolutionUserSelectField(controller) ?: return
+            field.setBoolean(controller, false)
+        } catch (e: Throwable) {
+            LogUtil.warn("最高画质：重置 isUserSelect 失败: $e")
+        }
+    }
+
     private fun applyHighestViaController(controller: Any?, highest: Any?): Boolean {
         if (controller == null || highest == null) return false
         return try {
             val target = resolveResolutionApplyMethod(controller, highest) ?: return false
             target.invoke(controller, highest)
+            // 宿主原生入口（如 pz4.w.S）内部会写 isUserSelect=true，导致每次切集下发清晰度时，
+            // 宿主都误以为是「用户主动在菜单手选」，从而在全屏播放时弹出「清晰度已切换到1080P」浮层提示。
+            // 模块自动切档属于后台静默行为，在此立即将 isUserSelect 抹回 false，避免每集打扰；
+            // 用户自己在宿主菜单手动选择画质时直接走宿主原生调用链，提示依然正常展示。
+            suppressAutoResolutionPrompt(controller)
             // 原生入口被证明可用 —— 此后所有「旁路写引擎」的兜底一律让位（见 gNativeResolutionEntryUsable）。
             gNativeResolutionEntryUsable = true
             LogUtil.info("最高画质：原生控制器 ${target.name}($highest)")
@@ -3315,7 +3364,7 @@ object Hooks {
 
             content.addView(sectionTitle(act, "界面精简", p))
             addSwitch("隐藏状态栏", "视频页面沉浸显示", { gStatusOn }, { gStatusOn = it }, "status_bar")
-            addSwitch("隐藏控件", "隐藏顶部/底部导航、作品信息和右侧互动等已适配区域", { gControlOn }, {
+            addSwitch("隐藏控件", "隐藏联播页顶栏/底栏、作品信息和右侧互动等已适配区域", { gControlOn }, {
                 gControlOn = it
                 if (!it) {
 
@@ -3324,12 +3373,6 @@ object Hooks {
                     mainHandler.postDelayed({ scanAllWindows() }, 120L)
                 }
             }, "control_hide")
-            addSwitch("选集相关功能", "隐藏联播页顶部和底部的选集相关控件", { gPlayerOn }, {
-                gPlayerOn = it
-                // 历史（已删）：开启时 setVideoToolbarsVisible(false)、关闭时 setVideoToolbarsVisible(true)
-                // —— 模块直接改写播放器工具栏层（播放页顶部/底部栏）的可见性，两个方向都已交还宿主。
-                // 本开关仍生效的部分：「选集条」的隐藏由 scanTreeUnified 的 seriesToolbarKind 分支负责。
-            }, "player_bar")
             addSwitch("隐藏视频进度条", "隐藏首页和连续播放页的进度条", { gProgressOff }, {
                 gProgressOff = it
                 if (!it) {
@@ -4314,7 +4357,6 @@ object Hooks {
     fun installBusinessHooks(module: MainHook, classLoader: ClassLoader, pkg: String) {
         LogUtil.info("── installBusinessHooks ── pkg=$pkg")
         gTargetIdSet.clear()
-        gSeriesTargetIdSet.clear()
         gProgressIdSet.clear()
         gPauseRestoreIdSet.clear()
         gPkg = pkg
@@ -4351,7 +4393,7 @@ object Hooks {
         gNames.pauseRestoreIds.forEach { gPauseRestoreIdSet.add(it) }
         val effectiveSeriesIds = if (gNames.seriesStaticIds.isNotEmpty()) gNames.seriesStaticIds else staticSeriesIds
         effectiveSeriesIds.forEach {
-            gSeriesTargetIdSet.add(it)
+            gTargetIdSet.add(it)
             gPauseRestoreIdSet.add(it)
         }
         val versionExact = TargetNames.isSupported(pkg, detected.first) && resolution.exactVersion
@@ -4367,7 +4409,7 @@ object Hooks {
             }
             LogUtil.warn("⚠ 该版本不在适配表内，部分功能可能静默失效；请补充映射或回滚到已适配版本")
         }
-        LogUtil.info("资源兼容：hideIds=${gTargetIdSet.joinToString { "0x%08X".format(it) }} | seriesIds=${gSeriesTargetIdSet.joinToString { "0x%08X".format(it) }} | progressIds=${gProgressIdSet.joinToString { "0x%08X".format(it) }} | pauseIds=${gPauseRestoreIdSet.joinToString { "0x%08X".format(it) }}")
+        LogUtil.info("资源兼容：hideIds=${gTargetIdSet.joinToString { "0x%08X".format(it) }} | progressIds=${gProgressIdSet.joinToString { "0x%08X".format(it) }} | pauseIds=${gPauseRestoreIdSet.joinToString { "0x%08X".format(it) }}")
 
         mainHandler.postDelayed({
             try {
@@ -5342,7 +5384,7 @@ object Hooks {
                 val result = chain.proceed()
                 setVideoPaused(false, "LayerHostMediaLayout#onVideoPlay")
                 scheduleDefaultSpeedApply("LayerHostMediaLayout#onVideoPlay")
-                if (gMasterOn && gPlayerOn && !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) {
+                if (gMasterOn && gControlOn && !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())) {
                     // 历史（已删）：这里曾在每次起播时 setVideoToolbarsVisible(false) 收起工具栏
                     // —— 同属「模块写控制层可见性」，已交还宿主（方案 A）。
                     mainHandler.post { scanAllWindows() }
@@ -5511,7 +5553,7 @@ object Hooks {
                                 synchronized(gKnownRefreshAccessoryViews) { gKnownRefreshAccessoryViews[view] = true }
                                 View.GONE
                             }
-                            (gControlOn || gPlayerOn) && quickMatch(view) ->
+                            gControlOn && quickMatch(view) ->
                                 if (shouldCollapseControl(view)) View.GONE else View.INVISIBLE
                             gProgressOff && isProgressBar(view) -> View.GONE
                             else -> null
@@ -5597,7 +5639,7 @@ object Hooks {
                         val v = chain.thisObject as? View
                         blocked = v != null && v.visibility != View.VISIBLE &&
                             shouldApplyUiHiding() && gMasterOn && (
-                                ((gControlOn || gPlayerOn) && quickMatch(v)) ||
+                                (gControlOn && quickMatch(v)) ||
                                 (gProgressOff && isProgressBar(v))
                             ) &&
                             !(gRestoreControlsOnPause && gVideoPaused && !isEpisodeSwitchPause())
